@@ -1604,3 +1604,38 @@ fn imya_edinicy_vidno_v_nastroykah() {
     assert_eq!(Settlement::Cw20(Addr::unchecked(CW20)).label(),
                format!("cw20:{CW20}"));
 }
+
+
+#[test]
+fn list_razvyortyvaniya_razbiraetsya_kontraktom() {
+    // Лист в deploy/instantiate.json — то, чем контракт будут разворачивать
+    // на самом деле. Если он разойдётся с формой сообщения, это выяснится
+    // при развёртывании, на живой цепочке и за газ. Пусть выясняется здесь.
+    //
+    // Адреса в листе — заглушки: InstantiateMsg принимает их строками, а
+    // проверяет уже контракт при instantiate. Здесь проверяется ФОРМА.
+    let raw = include_str!("../deploy/instantiate.json");
+    let msg: InstantiateMsg = serde_json::from_str(raw).expect("лист не разобран");
+    assert_eq!(msg.threshold_micro, THRESHOLD, "порог тот, что измерен");
+    assert_eq!(msg.checks_required, 4);
+    assert_eq!(msg.min_answer_tokens, 32);
+    assert_eq!(msg.pinned_model, MODEL);
+    assert_eq!(msg.pinned_runtime, RUNTIME);
+    assert_eq!(msg.pinned_dtype, DTYPE);
+    assert_eq!(msg.verifier_fee_bps, FEE_BPS);
+    // Решено 14 октября: залог 30 400 AXM, расчёт родной монетой,
+    // конфискат по адресу (BankMsg::Burn на самой Axiome не проверен).
+    assert_eq!(msg.min_stake, Uint128::new(30_400_000_000));
+    assert!(matches!(msg.settlement, Settlement::Native(ref d) if d == "uaxm"));
+    assert!(matches!(msg.forfeit, Forfeit::ToAddress(_)));
+    // Эталон пробы в листе обязан совпадать с тем, что лежит у демонов:
+    // иначе узлы считают пробу против одного набора, а контракт ждёт
+    // другого, и честный узел получает отказ.
+    assert_eq!(msg.conformance_lens.len(), 34, "34 текста пробы");
+    assert_eq!(
+        msg.conformance_ref_hash,
+        "ed6a265b272006ac9279a7fee66c7e243ed6586fe87b0bd6526257c83a7da2b1",
+        "эталон пробы тот же, что в daemon/probe/probe.json"
+    );
+    assert_eq!(msg.conformance_limit_micro, 60_000, "предел, выведенный из замеров");
+}
