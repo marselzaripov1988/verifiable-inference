@@ -48,10 +48,18 @@ class UnknownAccount(LedgerError):
     pass
 
 
+class NoFreeAddress(LedgerError):
+    """Свободных адресов для приёма не осталось."""
+
+
 @dataclass
 class Account:
     key: str          #: секрет клиента, им он доказывает право на остаток
     code: str         #: код для памятки платежа, публичный
+    #: Свой адрес для приёма. С ним памятка не нужна вовсе: зачисление
+    #: идёт по получателю, и кошелёк, не умеющий памятку, перестаёт быть
+    #: препятствием. Пустой — счёт работает по памятке на общую казну.
+    deposit: str = ""
     balance: int = 0  #: в минимальных единицах сети (uaxm либо uartr)
     reserved: int = 0
     spent: int = 0
@@ -71,6 +79,11 @@ class Ledger:
         self._lock = threading.RLock()
         self.accounts: dict[str, Account] = {}
         self.by_code: dict[str, str] = {}
+        #: Адрес приёма -> ключ счёта.
+        self.by_deposit: dict[str, str] = {}
+        #: Свободные адреса приёма. Заполняются ИЗВНЕ, из кошелька
+        #: владельца: шлюз ключей не держит и адресов не выводит сам.
+        self.free: list[str] = []
         self.processed: set[str] = set()
         self.unclaimed: list[dict] = []
         self.height = 0
@@ -85,6 +98,9 @@ class Ledger:
             d = json.load(f)
         self.accounts = {k: Account(**v) for k, v in d.get("accounts", {}).items()}
         self.by_code = {a.code: a.key for a in self.accounts.values()}
+        self.by_deposit = {a.deposit: a.key for a in self.accounts.values()
+                           if a.deposit}
+        self.free = list(d.get("free", []))
         self.processed = set(d.get("processed", []))
         self.unclaimed = d.get("unclaimed", [])
         self.height = int(d.get("height", 0))
@@ -92,6 +108,7 @@ class Ledger:
     def _save(self) -> None:
         d = {
             "accounts": {k: asdict(a) for k, a in self.accounts.items()},
+            "free": self.free,
             "processed": sorted(self.processed),
             "unclaimed": self.unclaimed,
             "height": self.height,
@@ -114,16 +131,51 @@ class Ledger:
 
     # --- счета ------------------------------------------------------------
 
-    def open_account(self) -> Account:
-        """Новый счёт. Код короткий — его придётся вводить руками в кошельке."""
+    def add_addresses(self, addrs) -> int:
+        """Пополнить пул адресов приёма. Возвращает, сколько добавлено.
+
+        Уже выданные и уже лежащие в пуле пропускаются: выдать один
+        адрес двум счетам значит смешать чужие деньги.
+        """
+        with self._lock:
+            known = set(self.free) | set(self.by_deposit)
+            new = [a.lower() for a in addrs if a.lower() not in known]
+            # Порядок сохраняется, дубликаты внутри списка убираются.
+            seen, keep = set(), []
+            for a in new:
+                if a not in seen:
+                    seen.add(a)
+                    keep.append(a)
+            self.free.extend(keep)
+            if keep:
+                self._save()
+            return len(keep)
+
+    def open_account(self, need_deposit: bool = False) -> Account:
+        """Новый счёт. Код короткий — его придётся вводить руками в кошельке.
+
+        need_deposit=True выдаёт счёту свой адрес приёма и отказывает,
+        если свободных нет. Отказ лучше выдачи общей казны без
+        предупреждения: клиент заплатил бы без памятки, и платёж попал бы
+        в неразобранные.
+        """
         with self._lock:
             while True:
                 code = "ag-" + secrets.token_hex(3)
                 if code not in self.by_code:
                     break
-            a = Account(key=secrets.token_urlsafe(24), code=code)
+            deposit = ""
+            if need_deposit:
+                if not self.free:
+                    raise NoFreeAddress(
+                        "свободных адресов приёма нет: пополните пул")
+                deposit = self.free.pop(0)
+            a = Account(key=secrets.token_urlsafe(24), code=code,
+                        deposit=deposit)
             self.accounts[a.key] = a
             self.by_code[code] = a.key
+            if deposit:
+                self.by_deposit[deposit] = a.key
             self._save()
             return a
 
@@ -136,8 +188,12 @@ class Ledger:
     # --- деньги -----------------------------------------------------------
 
     def credit(self, tx_hash: str, height: int, sender: str, amount: int,
-               memo: str) -> Account | None:
-        """Зачислить платёж. None — счёт по памятке не опознан.
+               memo: str, recipient: str = "") -> Account | None:
+        """Зачислить платёж. None — счёт не опознан.
+
+        Сопоставление по ПОЛУЧАТЕЛЮ, если у счёта свой адрес приёма, и
+        только затем по памятке. Порядок именно такой: адрес надёжнее —
+        его нельзя забыть вписать.
 
         Повторный вызов с тем же хэшем ничего не делает: платёж уже
         зачтён. Высота двигается всегда, в том числе для неопознанного —
@@ -146,19 +202,21 @@ class Ledger:
         with self._lock:
             if tx_hash in self.processed:
                 return None
-            code = _find_code(memo, self.by_code)
+            key = self.by_deposit.get((recipient or "").lower())
+            code = None if key else _find_code(memo, self.by_code)
             self.processed.add(tx_hash)
             self.height = max(self.height, height)
-            if code is None:
+            if key is None and code is None:
                 # Деньги не теряются и не зачисляются наугад: платёж
                 # остаётся видимым, и его разбирает человек.
                 self.unclaimed.append({
                     "tx_hash": tx_hash, "height": height, "sender": sender,
-                    "amount": amount, "memo": memo[:120], "at": time.time(),
+                    "amount": amount, "memo": memo[:120],
+                    "recipient": recipient, "at": time.time(),
                 })
                 self._save()
                 return None
-            a = self.accounts[self.by_code[code]]
+            a = self.accounts[key or self.by_code[code]]
             a.balance += amount
             self._save()
             return a

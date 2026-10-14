@@ -31,7 +31,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import inference
 from .chain import ArteryRPC
-from .ledger import InsufficientFunds, Ledger, UnknownAccount
+from .ledger import (
+    InsufficientFunds,
+    Ledger,
+    NoFreeAddress,
+    UnknownAccount,
+)
 from .pricing import Pricing
 
 MAX_BODY = 256 * 1024
@@ -42,13 +47,17 @@ class Gateway:
 
     def __init__(self, ledger: Ledger, pricing: Pricing, treasury: str,
                  rpc: ArteryRPC, base_url: str,
-                 model: str = inference.PINNED_MODEL):
+                 model: str = inference.PINNED_MODEL,
+                 per_account: bool = False):
         self.ledger = ledger
         self.pricing = pricing
         self.treasury = treasury
         self.rpc = rpc
         self.base_url = base_url
         self.model = model
+        #: Выдавать ли каждому счёту свой адрес приёма. С ним памятка не
+        #: нужна, и кошелёк, который её не умеет, перестаёт мешать.
+        self.per_account = per_account
         #: Минимальная единица сети — из приёмника, а не из настроек:
         #: иначе подсказка об оплате и зачисление могли бы разойтись.
         self.denom = rpc.denom
@@ -68,10 +77,18 @@ class Gateway:
         """
         try:
             n = 0
-            for p in self.rpc.scan_payments(self.treasury,
-                                            self.ledger.height + 1):
+            # Опрос по диапазону высот, когда адресов больше одного: один
+            # запрос за цикл независимо от числа счетов. По индексу на
+            # каждый адрес их было бы по запросу на счёт.
+            watched = {self.treasury} | set(self.ledger.by_deposit)
+            if len(watched) > 1:
+                found = self.rpc.scan_range(watched, self.ledger.height + 1)
+            else:
+                found = self.rpc.scan_payments(self.treasury,
+                                               self.ledger.height + 1)
+            for p in found:
                 if self.ledger.credit(p.tx_hash, p.height, p.sender,
-                                      p.amount_micro, p.memo):
+                                      p.amount_micro, p.memo, p.recipient):
                     n += 1
             self.poll_error = None
             self.last_poll = time.time()
@@ -171,12 +188,15 @@ def make_handler(gw: Gateway):
                         "last_poll": gw.last_poll,
                         "poll_error": gw.poll_error,
                         "accounts": len(gw.ledger.accounts),
+                        "free_addresses": len(gw.ledger.free),
+                        "watched_addresses": 1 + len(gw.ledger.by_deposit),
                         "unclaimed": len(gw.ledger.unclaimed),
                     })
                 if self.path == "/v1/account":
                     a = gw.ledger.account(self._key())
                     return self._send(200, {
-                        "code": a.code, "balance_micro": a.balance,
+                        "code": a.code, "deposit": a.deposit,
+                        "balance_micro": a.balance,
                         "reserved_micro": a.reserved, "spent_micro": a.spent,
                         "tokens": a.tokens,
                     })
@@ -189,16 +209,19 @@ def make_handler(gw: Gateway):
         def do_POST(self):
             try:
                 if self.path == "/v1/account":
-                    a = gw.ledger.open_account()
+                    a = gw.ledger.open_account(need_deposit=gw.per_account)
+                    how = (f"перевод на {a.deposit} в {gw.denom}; "
+                           f"памятка не нужна — адрес ваш" if a.deposit else
+                           f"перевод на {gw.treasury} в {gw.denom}, "
+                           f"в памятке укажите {a.code}")
                     return self._send(201, {
                         "api_key": a.key,
                         "code": a.code,
+                        "deposit": a.deposit or gw.treasury,
                         "treasury": gw.treasury,
                         "price_micro_per_million":
                             gw.pricing.price_micro_per_million,
-                        "как_платить":
-                            f"перевод на {gw.treasury} в {gw.denom}, "
-                            f"в памятке укажите {a.code}",
+                        "как_платить": how,
                     })
                 if self.path == "/v1/completions":
                     b = self._body()
@@ -208,6 +231,9 @@ def make_handler(gw: Gateway):
                 return self._send(404, {"error": "нет такого пути"})
             except UnknownAccount as e:
                 return self._send(401, {"error": str(e)})
+            except NoFreeAddress as e:
+                # 503, а не 500: это нехватка запаса, а не поломка.
+                return self._send(503, {"error": str(e)})
             except InsufficientFunds as e:
                 return self._send(402, {
                     "error": str(e), "have_micro": e.have, "need_micro": e.need,

@@ -50,6 +50,11 @@ def main() -> int:
                     help="как часто читать платежи, секунды")
     ap.add_argument("--from-height", type=int, default=0,
                     help="с какой высоты читать платежи при первом запуске")
+    ap.add_argument("--addresses",
+                    help="файл с адресами приёма, по одному на строку: "
+                         "каждому счёту выдаётся свой, и памятка не нужна. "
+                         "Адреса берутся из ВАШЕГО кошелька — шлюз ключей "
+                         "не держит и адресов не выводит")
     ap.add_argument("--allow-unfit-node", action="store_true",
                     help="поднять шлюз, даже если узел не годен: только "
                          "чтобы проверить приём платежей без карты")
@@ -66,7 +71,40 @@ def main() -> int:
         print(f"АДРЕС КАЗНЫ НЕ ГОДИТСЯ: {e}", file=sys.stderr)
         return 1
 
+    # Адреса приёма проверяются так же, как казна, и по той же причине:
+    # опечатка дала бы адрес, на который клиент переведёт, а шлюз не
+    # увидит. Деньги при этом уйдут не в никуда, а туда, где их никто не
+    # ждёт — хуже, чем отказ.
+    pool = []
+    if a.addresses:
+        try:
+            with open(a.addresses, encoding="utf-8") as f:
+                raw = [x.strip() for x in f if x.strip()
+                       and not x.strip().startswith("#")]
+        except OSError as e:
+            print(f"ФАЙЛ АДРЕСОВ НЕ ПРОЧИТАН: {e}", file=sys.stderr)
+            return 1
+        for i, line in enumerate(raw, 1):
+            try:
+                pool.append(check(line, rpc_class.hrp))
+            except BadAddress as e:
+                print(f"АДРЕС ПРИЁМА В СТРОКЕ {i} НЕ ГОДИТСЯ: {e}",
+                      file=sys.stderr)
+                return 1
+        if not pool:
+            print("ФАЙЛ АДРЕСОВ ПУСТ: выдавать клиентам нечего",
+                  file=sys.stderr)
+            return 1
+        if treasury in pool:
+            print("АДРЕС КАЗНЫ ЕСТЬ В ПУЛЕ: платежи на него считались бы "
+                  "и по получателю, и по памятке", file=sys.stderr)
+            return 1
+
     led = Ledger(a.ledger)
+    if pool:
+        added = led.add_addresses(pool)
+        print(f"адресов приёма: добавлено {added}, свободно {len(led.free)}, "
+              f"выдано {len(led.by_deposit)}")
     if a.from_height and not led.height:
         led.height = a.from_height - 1
         led._save()
@@ -78,6 +116,7 @@ def main() -> int:
         rpc=rpc_class(a.rpc),
         base_url=a.base_url,
         model=a.model,
+        per_account=bool(a.addresses),
     )
 
     try:

@@ -50,10 +50,14 @@ class Payment:
     sender: str
     #: Сумма в минимальных единицах: uartr либо uaxm, смотря чей приёмник.
     amount_micro: int
-    #: Памятка транзакции: по ней платёж сопоставляется со счётом.
-    #: Пустая — платёж не опознан, и он уйдёт в неразобранные, а не
-    #: будет зачислен наугад по адресу отправителя.
+    #: Памятка транзакции: по ней платёж сопоставляется со счётом,
+    #: когда казна одна. Пустая — платёж не опознан, и он уйдёт в
+    #: неразобранные, а не будет зачислен наугад по отправителю.
     memo: str = ""
+    #: Получатель. При адресе на счёт сопоставление идёт по нему, и
+    #: памятка не нужна вовсе: кошелёк, который её не умеет, перестаёт
+    #: быть препятствием.
+    recipient: str = ""
 
     @property
     def amount_whole(self) -> float:
@@ -149,8 +153,54 @@ class ChainRPC:
                     sender=sender,
                     amount_micro=total,
                     memo=_memo_of(tx),
+                    recipient=treasury.lower(),
                 )
 
+            if page * page_size >= int(result.get("total_count", 0)):
+                return
+            page += 1
+
+    def scan_range(self, recipients, from_height: int = 1,
+                   page_size: int = 50):
+        """Платежи на ЛЮБОЙ из адресов, начиная с высоты.
+
+        Запрос идёт по одной высоте, без получателя, а отбор по адресам
+        делается здесь. Так один опрос стоит один запрос независимо от
+        числа счетов — иначе при адресе на счёт их было бы по запросу на
+        каждый, и сотня клиентов означала бы сотню запросов за цикл.
+
+        Это возможно потому, что цепочка тихая: замерено 13 сделок за
+        200 блоков axiome-1. На оживлённой цепочке пришлось бы вернуться
+        к запросу по индексу на каждый адрес.
+        """
+        want = {r.lower() for r in recipients}
+        if not want:
+            return
+        query = f"tx.height>={from_height}"
+        page = 1
+        while True:
+            result = self._get("tx_search", query=f'"{query}"', prove="false",
+                               page=str(page), per_page=str(page_size))
+            txs = result.get("txs", [])
+            if not txs:
+                return
+            for tx in txs:
+                if tx["tx_result"].get("code", 0) != 0:
+                    continue
+                events = tx["tx_result"].get("events", [])
+                for to in want:
+                    got = _credited_amount(events, to, self.denom, self.events)
+                    if got is None:
+                        continue
+                    sender, total = got
+                    yield Payment(
+                        tx_hash=tx["hash"],
+                        height=int(tx["height"]),
+                        sender=sender,
+                        amount_micro=total,
+                        memo=_memo_of(tx),
+                        recipient=to,
+                    )
             if page * page_size >= int(result.get("total_count", 0)):
                 return
             page += 1

@@ -50,8 +50,12 @@ class FakeRPC(AxiomeRPC):
     def __init__(self):
         super().__init__("http://нет")
         self.txs: list[dict] = []
+        #: Сколько запросов к цепочке сделано — им проверяется, что опрос
+        #: не растёт с числом счетов.
+        self.calls = 0
 
     def _get(self, path, **params):
+        self.calls += 1
         if path == "status":
             return {"sync_info": {"latest_block_height": "100"}}
         if path == "tx_search":
@@ -60,7 +64,8 @@ class FakeRPC(AxiomeRPC):
             return {"txs": self.txs, "total_count": str(len(self.txs))}
         raise AssertionError(path)
 
-    def pay(self, tx_hash: str, height: int, amount: int, memo: str):
+    def pay(self, tx_hash: str, height: int, amount: int, memo: str,
+            recipient: str = TREASURY):
         import base64
         self.txs.append({
             "hash": tx_hash,
@@ -72,7 +77,7 @@ class FakeRPC(AxiomeRPC):
                     "type": "transfer",
                     "attributes": [
                         {"key": "sender", "value": PAYER},
-                        {"key": "recipient", "value": TREASURY},
+                        {"key": "recipient", "value": recipient},
                         {"key": "amount", "value": f"{amount}uaxm"},
                     ],
                 }],
