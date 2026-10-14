@@ -393,7 +393,14 @@ def test_shipped_probe():
     ok(len(p["texts"]) == 34, f"34 текста (вышло {len(p['texts'])})")
     ok(all(len(v) >= 32 for v in p["ref"]),
        "каждый текст не короче 32 чисел: ниже этой длины способ не работает")
-    ok(p["limit_micro"] == 25_000, "предел 25 000 — из замера")
+    ok(p["limit_micro"] == 60_000, "предел 60 000 — выведен из замеров")
+    obs = p["honest_observations"]
+    ok(max(v for k, v in obs.items() if "wrong" not in k) == 22_421,
+       "худшее честное наблюдение записано рядом с пределом")
+    ok(p["limit_micro"] > 22_421 * 2,
+       "запас к худшему честному не меньше двойного")
+    ok(obs["wrong_execution_mode_max"] > p["limit_micro"] * 5,
+       "неверный режим превышает предел с кратным запасом")
     ok(sum(p["lens"]) == 3948, f"всего 3 948 чисел (вышло {sum(p['lens'])})")
 
 
