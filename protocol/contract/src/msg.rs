@@ -67,7 +67,11 @@ pub enum ExecuteMsg {
     WithdrawStake { amount: Uint128 },
     /// Заказчик ставит задание и платит РОДНОЙ монетой — она приходит с
     /// транзакцией. Работает только при расчёте Native.
-    SubmitJob { prompt_hash: String },
+    ///
+    /// `price` — сколько получит исполнитель. Долю проверяющих заказчик
+    /// платит СВЕРХУ, поэтому с транзакцией должно прийти ровно
+    /// `price + доля`.
+    SubmitJob { prompt_hash: String, price: Uint128 },
     /// Приём CW20. При расчёте Cw20 заказчик НЕ вызывает SubmitJob
     /// напрямую: монеты приходят только так — Send на контракт с
     /// вложенным сообщением. Это цена того, что расчётная единица не
@@ -139,7 +143,9 @@ pub struct ConformanceRef {
 /// То, что заказчик кладёт в Send как msg.
 #[cw_serde]
 pub enum ReceiveHook {
-    SubmitJob { prompt_hash: String },
+    /// `price` — сколько получит исполнитель; переслать надо
+    /// `price + доля`.
+    SubmitJob { prompt_hash: String, price: Uint128 },
 }
 
 /// Исходящее в контракт CW20. Объявлено здесь по той же причине, что и

@@ -13,6 +13,17 @@ use crate::state::{
     Settlement, CHECKS, CONFIG, EXECUTORS, JOBS, NEXT_JOB,
 };
 
+/// Плата проверяющим от цены. Деление ВВЕРХ.
+///
+/// Вверх, а не вниз, потому что эту плату вносит заказчик сверх цены, и
+/// недобор означал бы, что проверяющим не хватило на доли. Лишние
+/// единицы, не разошедшиеся по долям, достаются получателю цены.
+fn fee_for(price: Uint128, bps: u16) -> Uint128 {
+    let num = price * Uint128::from(bps as u128);
+    let den = Uint128::from(10_000u128);
+    (num + den - Uint128::one()) / den
+}
+
 /// Выплата в единице расчёта. ЕДИНСТВЕННОЕ место, которое знает, чем
 /// идёт расчёт: иначе добавление родной монеты означало бы правку в
 /// каждом месте, где двигаются деньги, и одно из них забылось бы.
@@ -190,8 +201,8 @@ pub fn execute(
         } => set_suspended(deps, info, executor, suspended),
         ExecuteMsg::DepositStake {} => deposit_stake(deps, info),
         ExecuteMsg::WithdrawStake { amount } => withdraw_stake(deps, info, amount),
-        ExecuteMsg::SubmitJob { prompt_hash } => {
-            submit_job_native(deps, info, prompt_hash)
+        ExecuteMsg::SubmitJob { prompt_hash, price } => {
+            submit_job_native(deps, info, prompt_hash, price)
         }
         ExecuteMsg::Receive(r) => receive_cw20(deps, info, r),
         ExecuteMsg::SubmitConformance {
@@ -531,21 +542,41 @@ fn receive_cw20(
         return Err(ContractError::ZeroPrice);
     }
     match from_json(&r.msg)? {
-        ReceiveHook::SubmitJob { prompt_hash } => {
+        ReceiveHook::SubmitJob { prompt_hash, price } => {
             let client = deps.api.addr_validate(&r.sender)?;
-            create_job(deps, client, prompt_hash, r.amount)
+            create_job(deps, &cfg, client, prompt_hash, price, r.amount)
         }
     }
 }
 
 /// Поставить задание. Одна сборка на оба вида расчёта: раздвоив её, я
 /// бы раздвоил и жизненный цикл задания.
+///
+/// `price` — то, что получит исполнитель; `paid` — то, что внёс
+/// заказчик. Они обязаны различаться ровно на плату проверяющим:
+/// меньше — проверки нечем оплатить, больше — остаток завис бы на
+/// контракте, и вернуть его было бы некому.
 fn create_job(
     deps: DepsMut,
+    cfg: &Config,
     client: Addr,
     prompt_hash: String,
     price: Uint128,
+    paid: Uint128,
 ) -> Result<Response, ContractError> {
+    if price.is_zero() {
+        return Err(ContractError::ZeroPrice);
+    }
+    let fee_total = fee_for(price, cfg.verifier_fee_bps);
+    let want = price + fee_total;
+    if paid != want {
+        return Err(ContractError::WrongTotal {
+            want: want.to_string(),
+            got: paid.to_string(),
+            price: price.to_string(),
+            fee: fee_total.to_string(),
+        });
+    }
     let id = NEXT_JOB.load(deps.storage)?;
     JOBS.save(
         deps.storage,
@@ -561,6 +592,7 @@ fn create_job(
             guilty: None,
             reveal_verified: None,
             price,
+            fee_total,
             paid: false,
         },
     )?;
@@ -568,7 +600,9 @@ fn create_job(
     Ok(Response::new()
         .add_attribute("action", "submit_job")
         .add_attribute("job_id", id.to_string())
-        .add_attribute("price", price.to_string()))
+        .add_attribute("price", price.to_string())
+        .add_attribute("verifier_fee", fee_total.to_string())
+        .add_attribute("total", paid.to_string()))
 }
 
 /// Задание, оплаченное РОДНОЙ монетой: она приходит с транзакцией.
@@ -576,6 +610,7 @@ fn submit_job_native(
     deps: DepsMut,
     info: MessageInfo,
     prompt_hash: String,
+    price: Uint128,
 ) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
     let denom = match &cfg.settlement {
@@ -590,13 +625,13 @@ fn submit_job_native(
     };
     // Ровно одна монета и ровно того денoma. Чужая монета рядом с нужной
     // осталась бы в контракте навсегда: вернуть её некому и нечем.
-    let paid: Uint128 = info
+    let sent: Uint128 = info
         .funds
         .iter()
         .filter(|c| c.denom == denom)
         .map(|c| c.amount)
         .sum();
-    if info.funds.len() != 1 || paid.is_zero() {
+    if info.funds.len() != 1 || sent.is_zero() {
         let got = if info.funds.is_empty() {
             "ничего".to_string()
         } else {
@@ -608,7 +643,8 @@ fn submit_job_native(
         };
         return Err(ContractError::WrongSettlementFunds { want: denom, got });
     }
-    create_job(deps, info.sender, prompt_hash, paid)
+    let client = info.sender;
+    create_job(deps, &cfg, client, prompt_hash, price, sent)
 }
 
 fn active_executor(deps: &DepsMut, who: &Addr) -> Result<Executor, ContractError> {
@@ -958,26 +994,34 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
     // Проверяющие получают своё НЕЗАВИСИМО ОТ ВЕРДИКТА. Это не щедрость:
     // плати им из исхода — появится интерес к исходу. Им платят за то,
     // что проверка состоялась.
-    let fee_total = job.price * Uint128::from(cfg.verifier_fee_bps as u128)
-        / Uint128::from(10_000u128);
+    // Плата взята ИЗ ЗАДАНИЯ, а не пересчитана по текущей доле: её могли
+    // сменить после постановки, а деньги уже внесены.
+    let fee_total = job.fee_total;
     let share = fee_total / Uint128::from(checks.len() as u128);
     if !share.is_zero() {
         for c in &checks {
             msgs.push(pay(&cfg, &c.checker, share)?);
         }
     }
-    // Остаток от целочисленного деления остаётся на контракте, а не
-    // достаётся кому-то по случайности.
     let paid_fees = share * Uint128::from(checks.len() as u128);
-    let rest = job.price - paid_fees;
+    // Цена достаётся получателю ЦЕЛИКОМ: долю заказчик внёс сверху, и
+    // повышение доли голосованием не урезает выручку исполнителя.
+    let rest = job.price;
+    // Остаток платы, не разошедшийся по долям, возвращается ЗАКАЗЧИКУ.
+    // Он внёс его за проверку; не разошёлся — значит проверка его не
+    // получила, и оставлять его исполнителю не за что. В обычном случае
+    // остатка нет вовсе: доля делится без него.
+    let fee_left = fee_total - paid_fees;
 
     if guilty {
         e.convictions += 1;
         e.status = ExecutorStatus::Banned;
-        // Заказчику возвращается всё, кроме платы за проверки: ответ он
-        // получил негодный, но проверка работу сделала.
-        if !rest.is_zero() {
-            msgs.push(pay(&cfg, &job.client, rest)?);
+        // Заказчику возвращается цена: ответ он получил негодный. Плата
+        // проверяющим не возвращается — проверка работу сделала, и
+        // платят им независимо от вердикта.
+        let back = rest + fee_left;
+        if !back.is_zero() {
+            msgs.push(pay(&cfg, &job.client, back)?);
         }
         // Изъятие залога. Проверяющим он не достаётся ни при каком
         // устройстве настроек — варианта такого нет.
@@ -1007,6 +1051,9 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
         if !rest.is_zero() {
             msgs.push(pay(&cfg, &executor, rest)?);
         }
+        if !fee_left.is_zero() {
+            msgs.push(pay(&cfg, &job.client, fee_left)?);
+        }
     }
     EXECUTORS.save(deps.storage, &executor, &e)?;
 
@@ -1022,6 +1069,7 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
         .add_attribute("exceeded", exceeded.to_string())
         .add_attribute("guilty", guilty.to_string())
         .add_attribute("verifier_fees", paid_fees.to_string())
+        .add_attribute("fee_returned", fee_left.to_string())
         .add_attribute("settled", rest.to_string()))
 }
 

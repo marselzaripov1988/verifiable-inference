@@ -36,6 +36,11 @@ const STAKE: &str = "uaxm";
 const CW20: &str = "cw20token";
 const MIN_STAKE: u128 = 50_000_000;
 const PRICE: u128 = 1_000_000;
+/// Доля проверяющих при PRICE и FEE_BPS: ровно 97 000, без остатка.
+const FEE: u128 = 97_000;
+/// Сколько вносит ЗАКАЗЧИК: цену плюс долю. Долю платит он, а не
+/// исполнитель, — иначе повышение доли молча урезало бы выручку карт.
+const TOTAL: u128 = PRICE + FEE;
 const FEE_BPS: u16 = 970; // 9,7% — замеренные накладные при четырёх проверках
 
 const THRESHOLD: u64 = 36_000;
@@ -167,9 +172,10 @@ fn submit_job(deps: DepsMut) {
         mock_info(CW20, &[]),
         ExecuteMsg::Receive(Cw20ReceiveMsg {
             sender: CLIENT.into(),
-            amount: Uint128::new(PRICE),
+            amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
                 prompt_hash: "ph".into(),
+                price: Uint128::new(PRICE),
             })
             .unwrap(),
         }),
@@ -868,9 +874,10 @@ fn chuzhoy_cw20_ne_oplachivaet() {
     let err = execute(deps.as_mut(), mock_env(), mock_info("fake_token", &[]),
         ExecuteMsg::Receive(Cw20ReceiveMsg {
             sender: CLIENT.into(),
-            amount: Uint128::new(PRICE),
+            amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into() }).unwrap(),
+                prompt_hash: "ph".into(),
+                price: Uint128::new(PRICE) }).unwrap(),
         })).unwrap_err();
     assert!(matches!(err, ContractError::WrongCw20 { .. }));
 }
@@ -896,12 +903,12 @@ fn chestnomu_platyat_a_proveryayushchim_dolyu() {
     submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
-    // 970 bps от 1 000 000 это 97 000, на четверых по 24 250.
-    let paid: u128 = (97_000u128 / 4) * 4;
+    // 970 bps от 1 000 000 это 97 000, на четверых по 24 250 ровно.
+    // Исполнителю достаётся ЦЕНА ЦЕЛИКОМ: долю внёс заказчик сверху.
     assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
-        && a.value == paid.to_string()));
+        && a.value == FEE.to_string()));
     assert!(res.attributes.iter().any(|a| a.key == "settled"
-        && a.value == (PRICE - paid).to_string()));
+        && a.value == PRICE.to_string()));
     // Четыре сообщения проверяющим плюс одно исполнителю.
     assert_eq!(res.messages.len(), 5);
 }
@@ -1425,9 +1432,10 @@ fn submit_job_native(deps: DepsMut) {
     execute(
         deps,
         mock_env(),
-        mock_info(CLIENT, &coins(PRICE, NATIVE)),
+        mock_info(CLIENT, &coins(TOTAL, NATIVE)),
         ExecuteMsg::SubmitJob {
             prompt_hash: "ph1".into(),
+            price: Uint128::new(PRICE),
         },
     )
     .unwrap();
@@ -1463,7 +1471,8 @@ fn bez_deneg_zadaniya_net() {
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::WrongSettlementFunds { ref got, .. }
         if got == "ничего"));
 }
@@ -1473,8 +1482,9 @@ fn chuzhaya_moneta_ne_oplachivaet() {
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(),
-        mock_info(CLIENT, &coins(PRICE, "uatom")),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+        mock_info(CLIENT, &coins(TOTAL, "uatom")),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::WrongSettlementFunds { .. }));
 }
 
@@ -1483,14 +1493,15 @@ fn chuzhaya_moneta_ryadom_s_nuzhnoy_otvergaetsya() {
     // Она осталась бы в контракте навсегда: вернуть её некому и нечем.
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    let mut funds = coins(PRICE, NATIVE);
+    let mut funds = coins(TOTAL, NATIVE);
     funds.push(cosmwasm_std::Coin {
         denom: "uatom".into(),
         amount: Uint128::new(5),
     });
     funds.sort_by(|a, b| a.denom.cmp(&b.denom));
     let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &funds),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::WrongSettlementFunds { .. }));
 }
 
@@ -1502,9 +1513,10 @@ fn cw20_pri_rodnom_raschyote_ne_prinimaetsya() {
     let err = execute(deps.as_mut(), mock_env(), mock_info(CW20, &[]),
         ExecuteMsg::Receive(Cw20ReceiveMsg {
             sender: CLIENT.into(),
-            amount: Uint128::new(PRICE),
+            amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into() }).unwrap(),
+                prompt_hash: "ph".into(),
+                price: Uint128::new(PRICE) }).unwrap(),
         })).unwrap_err();
     assert!(matches!(err, ContractError::NotCw20Settlement));
 }
@@ -1515,8 +1527,9 @@ fn rodnoy_platyozh_pri_raschyote_cw20_ne_prinimaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(),
-        mock_info(CLIENT, &coins(PRICE, NATIVE)),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+        mock_info(CLIENT, &coins(TOTAL, NATIVE)),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::NotNativeSettlement { .. }));
 }
 
@@ -1529,10 +1542,11 @@ fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
     submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
-    // Те же 970 bps: на четверых по 24 250, исполнителю остальное.
-    let paid: u128 = (97_000u128 / 4) * 4;
+    // Те же 970 bps: на четверых по 24 250, исполнителю ЦЕНА ЦЕЛИКОМ.
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
+        && a.value == FEE.to_string()));
     assert!(res.attributes.iter().any(|a| a.key == "settled"
-        && a.value == (PRICE - paid).to_string()));
+        && a.value == PRICE.to_string()));
     assert_eq!(res.messages.len(), 5);
     // Проверка по ТИПУ сообщения, а не по отладочной строке: строка —
     // представление, и меняется она не вместе с поведением.
@@ -1549,7 +1563,7 @@ fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
             other => panic!("выплата не родной монетой: {other:?}"),
         }
     }
-    assert_eq!(sent, PRICE, "разошлась вся цена задания, без остатка");
+    assert_eq!(sent, TOTAL, "разошлось всё внесённое заказчиком, без остатка");
 }
 
 #[test]
@@ -1590,9 +1604,10 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
     submit_job_native(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(CW20, &[]),
         ExecuteMsg::Receive(Cw20ReceiveMsg {
-            sender: CLIENT.into(), amount: Uint128::new(PRICE),
+            sender: CLIENT.into(), amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into() }).unwrap(),
+                prompt_hash: "ph".into(),
+                price: Uint128::new(PRICE) }).unwrap(),
         })).unwrap_err();
     assert!(matches!(err, ContractError::NotCw20Settlement));
 }
@@ -1638,4 +1653,152 @@ fn list_razvyortyvaniya_razbiraetsya_kontraktom() {
         "эталон пробы тот же, что в daemon/probe/probe.json"
     );
     assert_eq!(msg.conformance_limit_micro, 60_000, "предел, выведенный из замеров");
+}
+
+// --- долю платит заказчик -------------------------------------------------
+//
+// Решено 14 октября. До этого доля вычиталась из цены, и исполнитель
+// получал её минус 9,7%: повышение доли голосованием молча урезало бы
+// выручку каждой карты. Теперь цена — то, что получит исполнитель, а долю
+// заказчик вносит сверху.
+
+#[test]
+fn zakazchik_vnosit_cenu_plyus_dolyu() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let res = execute(deps.as_mut(), mock_env(),
+        mock_info(CLIENT, &coins(TOTAL, NATIVE)),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::new(PRICE) }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "price"
+        && a.value == PRICE.to_string()));
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fee"
+        && a.value == FEE.to_string()));
+    assert!(res.attributes.iter().any(|a| a.key == "total"
+        && a.value == TOTAL.to_string()));
+}
+
+#[test]
+fn nedoplata_i_pereplata_otvergayutsya() {
+    // Меньше — проверки нечем оплатить. Больше — остаток завис бы на
+    // контракте, и вернуть его было бы некому.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    for sent in [PRICE, TOTAL - 1, TOTAL + 1] {
+        let err = execute(deps.as_mut(), mock_env(),
+            mock_info(CLIENT, &coins(sent, NATIVE)),
+            ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+                price: Uint128::new(PRICE) }).unwrap_err();
+        assert!(matches!(err, ContractError::WrongTotal { .. }),
+            "сумма {sent} принята, а не должна");
+    }
+}
+
+#[test]
+fn nulevaya_cena_otvergaetsya() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(),
+        mock_info(CLIENT, &coins(1, NATIVE)),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::zero() }).unwrap_err();
+    assert!(matches!(err, ContractError::ZeroPrice));
+}
+
+#[test]
+fn ispolnitel_poluchaet_cenu_celikom() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_attest(deps.as_mut(), EXEC);
+    let id = native_job_until_answered(deps.as_mut());
+    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "settled"
+        && a.value == PRICE.to_string()), "цена целиком, без вычета доли");
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
+        && a.value == FEE.to_string()));
+}
+
+#[test]
+fn povyshenie_doli_ne_urezaet_vyruchku_ispolnitelya() {
+    // САМОЕ важное свойство этой правки. Доля — параметр, и её могут
+    // сменить между постановкой задания и вердиктом. Деньги к тому
+    // времени уже внесены, поэтому плата берётся ИЗ ЗАДАНИЯ, а не
+    // пересчитывается по новой доле.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_attest(deps.as_mut(), EXEC);
+    let id = native_job_until_answered(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+        ExecuteMsg::UpdateConfig {
+            attestor: None, threshold_micro: None, checks_required: None,
+            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            pinned_dtype: None, conformance_limit_micro: None,
+            conformance_ref: None, settlement: None, stake_denom: None,
+            min_stake: None, verifier_fee_bps: Some(5_000), forfeit: None,
+        }).unwrap();
+    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "settled"
+        && a.value == PRICE.to_string()),
+        "доля выросла до 50%, а исполнитель получил цену целиком");
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
+        && a.value == FEE.to_string()),
+        "проверяющим ушло столько, сколько внесли при постановке");
+}
+
+#[test]
+fn dolya_delitsya_vverh_a_ostatok_vozvrashchaetsya_zakazchiku() {
+    // Цена 1: доля 970/10000 = 0,097, вверх это 1. Поделить одну единицу
+    // на четверых нельзя, и она возвращается ЗАКАЗЧИКУ: он внёс её за
+    // проверку, проверка её не получила — оставлять исполнителю не за что.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_attest(deps.as_mut(), EXEC);
+    execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &coins(2, NATIVE)),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            price: Uint128::one() }).unwrap();
+    let id = 1;
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: id }).unwrap();
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::SubmitAnswer { job_id: id, answer_hash: "a".into(),
+            logprobs_hash: "l".into(), answer_tokens: 120 }).unwrap();
+    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
+        && a.value == "0"), "одну единицу на четверых не поделить");
+    assert!(res.attributes.iter().any(|a| a.key == "fee_returned"
+        && a.value == "1"), "неразошедшаяся плата вернулась заказчику");
+    // Ничьих денег на контракте не остаётся: 1 исполнителю, 1 заказчику.
+    let mut sent = 0u128;
+    for m in &res.messages {
+        if let cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            amount, ..
+        }) = &m.msg
+        {
+            sent += amount[0].amount.u128();
+        }
+    }
+    assert_eq!(sent, 2, "разошлось всё внесённое");
+}
+
+#[test]
+fn pri_podloge_zakazchiku_vozvrashchaetsya_cena_a_ne_vsyo() {
+    // Проверяющим платят независимо от вердикта: они работу сделали.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_attest(deps.as_mut(), EXEC);
+    let id = native_job_until_answered(deps.as_mut());
+    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "guilty" && a.value == "true"));
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
+        && a.value == FEE.to_string()), "проверяющим заплатили");
+    assert!(res.attributes.iter().any(|a| a.key == "settled"
+        && a.value == PRICE.to_string()), "заказчику вернулась цена");
 }

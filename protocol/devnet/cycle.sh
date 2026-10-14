@@ -150,8 +150,13 @@ echo "состояние: $st, проба: $cv"
 
 say "6. заказчик платит через Receive настоящего CW20"
 PRICE=1000000
-HOOK=$(echo -n '{"submit_job":{"prompt_hash":"ph1"}}' | base64 -w0)
-send wasm execute "$CW20" "{\"send\":{\"contract\":\"$REG\",\"amount\":\"$PRICE\",\"msg\":\"$HOOK\"}}" --from client >/dev/null
+# Долю проверяющих вносит ЗАКАЗЧИК, сверх цены: 970 bps от 1 000 000 это
+# 97 000. Цена — то, что получит исполнитель, и повышение доли её не
+# урезает.
+FEE=97000
+TOTAL=$((PRICE + FEE))
+HOOK=$(echo -n '{"submit_job":{"prompt_hash":"ph1","price":"1000000"}}' | base64 -w0)
+send wasm execute "$CW20" "{\"send\":{\"contract\":\"$REG\",\"amount\":\"$TOTAL\",\"msg\":\"$HOOK\"}}" --from client >/dev/null
 price=$($B query wasm contract-state smart "$REG" '{"job":{"job_id":1}}' $Q | jq -r '.data.price')
 [ "$price" = "$PRICE" ] || fail "цена задания $price, ожидалась $PRICE"
 echo "задание 1 создано через Receive, цена $price — путь CW20 РАБОТАЕТ"
@@ -180,7 +185,8 @@ g=$($B query wasm contract-state smart "$REG" '{"job":{"job_id":1}}' $Q | jq -r 
 SHARE=24250
 after_exec=$($B query wasm contract-state smart "$CW20" '{"balance":{"address":"'$EXEC'"}}' $Q | jq -r '.data.balance')
 got=$((after_exec - before_exec))
-want=$((PRICE - SHARE * 4))
+# Исполнителю достаётся цена ЦЕЛИКОМ: долю заказчик внёс сверху.
+want=$PRICE
 [ "$got" = "$want" ] || fail "исполнителю пришло $got, ожидалось $want"
 c0a=$($B keys show c0 -a --keyring-backend test --home $D)
 cb=$($B query wasm contract-state smart "$CW20" '{"balance":{"address":"'$c0a'"}}' $Q | jq -r '.data.balance')
@@ -198,7 +204,7 @@ SUP_BEFORE=$($B query bank total-supply-of stake $Q | jq -r '.amount.amount')
 send wasm execute "$REG" '{"deposit_stake":{}}' --amount ${MIN_STAKE}stake --from c3 >/dev/null
 C3=$($B keys show c3 -a --keyring-backend test --home $D)
 send wasm execute "$REG" "{\"attest\":{\"executor\":\"$C3\",\"eligible\":true}}" --from attestor >/dev/null
-send wasm execute "$CW20" "{\"send\":{\"contract\":\"$REG\",\"amount\":\"$PRICE\",\"msg\":\"$HOOK\"}}" --from client >/dev/null
+send wasm execute "$CW20" "{\"send\":{\"contract\":\"$REG\",\"amount\":\"$TOTAL\",\"msg\":\"$HOOK\"}}" --from client >/dev/null
 send wasm execute "$REG" '{"claim_job":{"job_id":2}}' --from c3 >/dev/null
 send wasm execute "$REG" '{"submit_answer":{"job_id":2,"answer_hash":"ah2","logprobs_hash":"lh2","answer_tokens":120}}' --from c3 >/dev/null
 for n in c0 c1 c2 executor; do
@@ -271,7 +277,7 @@ send wasm execute "$NREG" '{"deposit_stake":{}}' --amount ${MIN_STAKE}stake --fr
 send wasm execute "$NREG" "{\"attest\":{\"executor\":\"$EXEC\",\"eligible\":true}}" --from attestor >/dev/null
 
 # Задание и оплата ОДНОЙ транзакцией: монета идёт с ней.
-send wasm execute "$NREG" '{"submit_job":{"prompt_hash":"ph-native"}}' --amount ${PRICE}stake --from client >/dev/null
+send wasm execute "$NREG" '{"submit_job":{"prompt_hash":"ph-native","price":"'$PRICE'"}}' --amount ${TOTAL}stake --from client >/dev/null
 np=$($B query wasm contract-state smart "$NREG" '{"job":{"job_id":1}}' $Q | jq -r '.data.price')
 [ "$np" = "$PRICE" ] || fail "цена задания $np, ожидалась $PRICE"
 cbal=$($B query bank balances "$NREG" $Q | jq -r '.balances[]|select(.denom=="stake").amount')

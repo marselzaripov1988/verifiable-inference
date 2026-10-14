@@ -88,6 +88,14 @@ pub enum ContractError {
     #[error("цена задания нулевая")]
     ZeroPrice,
 
+    #[error("прислано {got}, а нужно {want}: цена {price} плюс доля проверяющих {fee}")]
+    WrongTotal {
+        want: String,
+        got: String,
+        price: String,
+        fee: String,
+    },
+
     #[error("по заданию уже выплачено")]
     AlreadyPaid,
 
