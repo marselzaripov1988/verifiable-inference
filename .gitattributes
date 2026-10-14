@@ -1,0 +1,5 @@
+# Скрипты исполняются в Linux-контейнерах — CRLF их ломает.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.py text eol=lf
