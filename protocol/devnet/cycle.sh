@@ -125,7 +125,7 @@ CONF_LIAR_HASH=a65355a94a1f443529e6db09861a235ee896070ad3d311aaee036fd668cfb37f
 REF_VEC=[-500000,-500000,-500000,-400000,-400000,-400000]
 HONEST_VEC=[-512700,-512700,-512700,-412700,-412700,-412700]
 LIAR_VEC=[-500000,-500000,-500000,-448000,-448000,-448000]
-send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement_denom\":\"cw20\",\"stake_denom\":\"stake\",\"settlement_cw20\":\"$CW20\",\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry --no-admin --from admin >/dev/null
+send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement\":{\"cw20\":\"$CW20\"},\"stake_denom\":\"stake\",\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry --no-admin --from admin >/dev/null
 REG=$($B query wasm list-contract-by-code "$REG_CODE" $Q | jq -r '.contracts[0]')
 thr=$($B query wasm contract-state smart "$REG" '{"config":{}}' $Q | jq -r '.data.threshold_micro')
 [ "$thr" = "36000" ] || fail "порог в цепочке $thr, ожидался 36000"
@@ -250,5 +250,55 @@ lied2=$($B query tx --type=hash "$h" $Q | jq -r '[.events[].attributes[]?|select
 ste=$($B query wasm contract-state smart "$REG" '{"executor":{"address":"'$EXEC'"}}' $Q | jq -r '.data.status')
 [ "$ste" = "active" ] || fail "честный исполнитель в состоянии [$ste]"
 echo "честного опровержение не тронуло: lied=$lied2, статус $ste"
+
+say "13. РОДНОЙ РАСЧЁТ: второй реестр, оплата монетой цепочки"
+# Шлюз этапа 1 собирает родной AXM, и расчёт обязан идти той же монетой,
+# иначе этапы считают в разном. Здесь это доказывается на цепочке, а не
+# только в тестах.
+send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement\":{\"native\":\"stake\"},\"stake_denom\":\"stake\",\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry-native --no-admin --from admin >/dev/null
+NREG=$($B query wasm list-contract-by-code "$REG_CODE" $Q | jq -r '.contracts[-1]')
+[ "$NREG" != "$REG" ] || fail "второй реестр не развернулся"
+sm=$($B query wasm contract-state smart "$NREG" '{"config":{}}' $Q | jq -r '.data.settlement.native')
+[ "$sm" = "stake" ] || fail "расчёт в [$sm], ожидался stake"
+echo "$NREG, расчёт родной монетой: $sm"
+
+# Исполнитель и проверяющие регистрируются в НОВОМ реестре.
+for n in executor c0 c1 c2 c3; do
+    send wasm execute "$NREG" '{"register_executor":{"model":"Qwen/Qwen2.5-7B-Instruct","runtime":"vllm-0.31.0","dtype":"bfloat16","card_class":"rtx4090"}}' --from $n >/dev/null
+    send wasm execute "$NREG" '{"submit_conformance":{"divergence_micro":12700,"logprobs_hash":"'$CONF_HONEST_HASH'"}}' --from $n >/dev/null
+done
+send wasm execute "$NREG" '{"deposit_stake":{}}' --amount ${MIN_STAKE}stake --from executor >/dev/null
+send wasm execute "$NREG" "{\"attest\":{\"executor\":\"$EXEC\",\"eligible\":true}}" --from attestor >/dev/null
+
+# Задание и оплата ОДНОЙ транзакцией: монета идёт с ней.
+send wasm execute "$NREG" '{"submit_job":{"prompt_hash":"ph-native"}}' --amount ${PRICE}stake --from client >/dev/null
+np=$($B query wasm contract-state smart "$NREG" '{"job":{"job_id":1}}' $Q | jq -r '.data.price')
+[ "$np" = "$PRICE" ] || fail "цена задания $np, ожидалась $PRICE"
+cbal=$($B query bank balances "$NREG" $Q | jq -r '.balances[]|select(.denom=="stake").amount')
+[ -n "$cbal" ] || fail "на контракте нет монет: платёж не дошёл"
+echo "задание 1 создано ОДНОЙ транзакцией, цена $np, на контракте $cbal"
+
+send wasm execute "$NREG" '{"claim_job":{"job_id":1}}' --from executor >/dev/null
+send wasm execute "$NREG" '{"submit_answer":{"job_id":1,"answer_hash":"ah","logprobs_hash":"lh","answer_tokens":120}}' --from executor >/dev/null
+for n in c0 c1 c2 c3; do
+    send wasm execute "$NREG" '{"submit_check":{"job_id":1,"divergence_micro":12700,"logprobs_hash":"n-'$n'"}}' --from $n >/dev/null
+done
+
+say "14. родные выплаты: сверить ДЕНЬГИ по балансам"
+# Проверяющий c0 между замерами ничего не отправляет, поэтому его
+# прирост равен доле ровно, без примеси газа.
+c0a=$($B keys show c0 -a --keyring-backend test --home $D)
+before_c0=$($B query bank balances "$c0a" $Q | jq -r '.balances[]|select(.denom=="stake").amount')
+send wasm execute "$NREG" '{"finalize":{"job_id":1}}' --from admin >/dev/null
+g=$($B query wasm contract-state smart "$NREG" '{"job":{"job_id":1}}' $Q | jq -r '.data.guilty')
+[ "$g" = "false" ] || fail "вердикт guilty=$g, ожидался false"
+after_c0=$($B query bank balances "$c0a" $Q | jq -r '.balances[]|select(.denom=="stake").amount')
+got=$((after_c0 - before_c0))
+[ "$got" = "$SHARE" ] || fail "проверяющему пришло $got, ожидалось $SHARE"
+left=$($B query bank balances "$NREG" $Q | jq -r '.balances[]|select(.denom=="stake").amount')
+left=${left:-0}
+[ "$left" = "$MIN_STAKE" ] || fail "на контракте осталось $left, ожидался только залог $MIN_STAKE"
+echo "проверяющему $got родной монетой, на контракте остался только залог $left"
+echo "РОДНОЙ РАСЧЁТ РАБОТАЕТ: оплата с транзакцией, выплаты BankMsg"
 
 say "ГОТОВО: полный цикл пройден на настоящей цепочке"

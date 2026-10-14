@@ -108,4 +108,13 @@ pub enum ContractError {
 
     #[error("эталонный набор пуст: пробу не из чего составить")]
     EmptyProbe,
+
+    #[error("расчёт идёт родной монетой: платите с транзакцией, а не через CW20")]
+    NotCw20Settlement,
+
+    #[error("расчёт идёт через CW20 {want}: платите Send на контракт")]
+    NotNativeSettlement { want: String },
+
+    #[error("с транзакцией пришло {got}, расчёт идёт в {want}")]
+    WrongSettlementFunds { want: String, got: String },
 }

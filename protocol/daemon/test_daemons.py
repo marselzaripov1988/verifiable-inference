@@ -150,7 +150,7 @@ def test_chain_params():
         "min_answer_tokens": 32,
         "pinned_model": "Qwen/Qwen2.5-7B-Instruct",
         "pinned_runtime": "vllm-0.31.0", "pinned_dtype": "bfloat16",
-        "settlement_denom": "cw20:axm1uz…", "stake_denom": "uaxm",
+        "settlement": {"cw20": "axm1uz…"}, "stake_denom": "uaxm",
         "conformance_limit_micro": "25000",
         "conformance_ref_hash": "0" * 64,
         "conformance_lens": [3, 3],
@@ -161,6 +161,15 @@ def test_chain_params():
     ok(p.threshold_micro == 36000, "порог из цепочки, строка приведена к числу")
     ok(p.checks_required == 4, "число проверок из цепочки")
     ok(p.stake_denom == "uaxm", "денom залога из цепочки")
+    ok(chain.settlement_label(p.settlement) == "cw20:axm1uz…",
+       "вид расчёта прочитан")
+    ok(chain.settlement_label({"native": "uaxm"}) == "uaxm",
+       "родной расчёт назван своим денomom")
+    try:
+        chain.settlement_label({"бред": 1})
+        ok(False, "неизвестный вид расчёта должен отвергаться")
+    except chain.ChainUnavailable:
+        ok(True, "неизвестный вид расчёта — отказ, а не умолчание")
     ok(p.conformance_limit_micro == 25000, "предел пробы из цепочки")
     ok(p.conformance_lens == (3, 3), "границы текстов пробы из цепочки")
 

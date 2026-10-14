@@ -19,7 +19,9 @@ use crate::msg::{
     ChecksResponse, ConformanceRef, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg, QueryMsg,
     ReceiveHook,
 };
-use crate::state::{Executor, ExecutorStatus, Forfeit, Job, JobState, MicroLog};
+use crate::state::{
+    Executor, ExecutorStatus, Forfeit, Job, JobState, MicroLog, Settlement,
+};
 
 const ADMIN: &str = "admin";
 const ATTESTOR: &str = "attestor";
@@ -30,7 +32,6 @@ const MODEL: &str = "Qwen/Qwen2.5-7B-Instruct";
 const RUNTIME: &str = "vllm-0.31.0";
 const DTYPE: &str = "bfloat16";
 // Имена денomов нигде в логике не участвуют — только в настройках.
-const SETTLEMENT: &str = "cw20:axm1uzldhz4dvv7k7gtc7jl5ahlj84eghc52p0r6zhnjca0d20dxcfkshsd8uz";
 const STAKE: &str = "uaxm";
 const CW20: &str = "cw20token";
 const MIN_STAKE: u128 = 50_000_000;
@@ -78,9 +79,8 @@ fn setup(deps: DepsMut) {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
-            settlement_denom: SETTLEMENT.into(),
+            settlement: Settlement::Cw20(Addr::unchecked(CW20)),
             stake_denom: STAKE.into(),
-            settlement_cw20: CW20.into(),
             min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS,
             forfeit: Forfeit::Burn,
@@ -597,7 +597,7 @@ fn prava_razdeleny() {
             pinned_dtype: None,
             conformance_limit_micro: None,
             conformance_ref: None,
-            settlement_denom: None,
+            settlement: None,
             stake_denom: None,
             min_stake: None,
             verifier_fee_bps: None,
@@ -651,9 +651,8 @@ fn nol_proverok_zapreshchen() {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
-            settlement_denom: SETTLEMENT.into(),
+            settlement: Settlement::Cw20(Addr::unchecked(CW20)),
             stake_denom: STAKE.into(),
-            settlement_cw20: CW20.into(),
             min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS,
             forfeit: Forfeit::Burn,
@@ -953,7 +952,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
             attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
-            settlement_denom: None, stake_denom: None,
+            settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: None,
             forfeit: Some(Forfeit::ToAddress(Addr::unchecked("community_pool"))),
         }).unwrap();
@@ -992,7 +991,7 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
             attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
-            settlement_denom: None, stake_denom: None,
+            settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: Some(10_001), forfeit: None,
         }).unwrap_err();
     assert!(matches!(err, ContractError::BadFeeBps { bps: 10_001 }));
@@ -1095,7 +1094,7 @@ fn smena_svyazki_obnulyaet_probu() {
             min_answer_tokens: None, pinned_model: None,
             pinned_runtime: Some("vllm-0.32.0".into()), pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
-            settlement_denom: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1118,7 +1117,7 @@ fn smena_etalona_obnulyaet_probu() {
                 ref_hash: commit_hash(&probe_honest()),
                 lens: PROBE_LENS.to_vec(),
             }),
-            settlement_denom: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1144,7 +1143,7 @@ fn zapis_toy_zhe_svyazki_probu_ne_obnulyaet() {
                 ref_hash: commit_hash(&probe_ref()),
                 lens: PROBE_LENS.to_vec(),
             }),
-            settlement_denom: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: Some(500), forfeit: None,
         }).unwrap();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1314,8 +1313,8 @@ fn pustoy_etalon_ne_prinimaetsya() {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: vec![],
-            settlement_denom: SETTLEMENT.into(), stake_denom: STAKE.into(),
-            settlement_cw20: CW20.into(), min_stake: Uint128::new(MIN_STAKE),
+            settlement: Settlement::Cw20(Addr::unchecked(CW20)),
+            stake_denom: STAKE.into(), min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS, forfeit: Forfeit::Burn,
         }).unwrap_err();
     assert!(matches!(err, ContractError::EmptyProbe));
@@ -1372,7 +1371,7 @@ fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
                 ref_hash: commit_hash(&probe_honest()),
                 lens: PROBE_LENS.to_vec(),
             }),
-            settlement_denom: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info("checker0", &[]),
@@ -1380,4 +1379,228 @@ fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
             job_id: id, divergence_micro: HONEST_MEAN, logprobs_hash: "h".into(),
         }).unwrap_err();
     assert!(matches!(err, ContractError::ConformanceStale { have: 1, want: 2 }));
+}
+
+// --- расчёт родной монетой ------------------------------------------------
+//
+// Зачем он понадобился: шлюз этапа 1 собирает родной AXM, а контракт умел
+// только CW20. Разные монеты на двух этапах пришлось бы объяснять каждому
+// владельцу карты, а BARTR для выплат слаб — выпуск разрешает сервер, и
+// 40% лежит на одном адресе.
+//
+// Вид расчёта — НАСТРОЙКА, а не два контракта: при появлении IBC расчёт
+// переедет на ваучер, то есть на третью единицу.
+
+const NATIVE: &str = "uaxm";
+
+fn setup_native(deps: DepsMut) {
+    instantiate(
+        deps,
+        mock_env(),
+        mock_info(ADMIN, &[]),
+        InstantiateMsg {
+            admin: ADMIN.into(),
+            attestor: ATTESTOR.into(),
+            threshold_micro: THRESHOLD,
+            checks_required: 4,
+            min_answer_tokens: 32,
+            pinned_model: MODEL.into(),
+            pinned_runtime: RUNTIME.into(),
+            pinned_dtype: DTYPE.into(),
+            conformance_limit_micro: CONF_LIMIT,
+            conformance_ref_hash: commit_hash(&probe_ref()),
+            conformance_lens: PROBE_LENS.to_vec(),
+            settlement: Settlement::Native(NATIVE.into()),
+            stake_denom: STAKE.into(),
+            min_stake: Uint128::new(MIN_STAKE),
+            verifier_fee_bps: FEE_BPS,
+            forfeit: Forfeit::Burn,
+        },
+    )
+    .unwrap();
+}
+
+/// Заказчик ставит задание и платит родной монетой — она идёт с транзакцией.
+fn submit_job_native(deps: DepsMut) {
+    execute(
+        deps,
+        mock_env(),
+        mock_info(CLIENT, &coins(PRICE, NATIVE)),
+        ExecuteMsg::SubmitJob {
+            prompt_hash: "ph1".into(),
+        },
+    )
+    .unwrap();
+}
+
+fn native_job_until_answered(deps: DepsMut) -> u64 {
+    let mut d = deps;
+    submit_job_native(d.branch());
+    let id = 1;
+    execute(d.branch(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: id }).unwrap();
+    execute(d.branch(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::SubmitAnswer {
+            job_id: id, answer_hash: "ah".into(),
+            logprobs_hash: "lh".into(), answer_tokens: 120,
+        }).unwrap();
+    id
+}
+
+#[test]
+fn rodnoy_platyozh_stavit_zadanie() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    submit_job_native(deps.as_mut());
+    let job: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(job.price, Uint128::new(PRICE));
+    assert_eq!(job.state, JobState::Open);
+}
+
+#[test]
+fn bez_deneg_zadaniya_net() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongSettlementFunds { ref got, .. }
+        if got == "ничего"));
+}
+
+#[test]
+fn chuzhaya_moneta_ne_oplachivaet() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(),
+        mock_info(CLIENT, &coins(PRICE, "uatom")),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongSettlementFunds { .. }));
+}
+
+#[test]
+fn chuzhaya_moneta_ryadom_s_nuzhnoy_otvergaetsya() {
+    // Она осталась бы в контракте навсегда: вернуть её некому и нечем.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let mut funds = coins(PRICE, NATIVE);
+    funds.push(cosmwasm_std::Coin {
+        denom: "uatom".into(),
+        amount: Uint128::new(5),
+    });
+    funds.sort_by(|a, b| a.denom.cmp(&b.denom));
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &funds),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongSettlementFunds { .. }));
+}
+
+#[test]
+fn cw20_pri_rodnom_raschyote_ne_prinimaetsya() {
+    // Иначе задание оказалось бы оплачено не тем, чем платят все.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CW20, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: CLIENT.into(),
+            amount: Uint128::new(PRICE),
+            msg: to_json_binary(&ReceiveHook::SubmitJob {
+                prompt_hash: "ph".into() }).unwrap(),
+        })).unwrap_err();
+    assert!(matches!(err, ContractError::NotCw20Settlement));
+}
+
+#[test]
+fn rodnoy_platyozh_pri_raschyote_cw20_ne_prinimaetsya() {
+    // Два пути для одних денег — это две дыры вместо одной двери.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(),
+        mock_info(CLIENT, &coins(PRICE, NATIVE)),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into() }).unwrap_err();
+    assert!(matches!(err, ContractError::NotNativeSettlement { .. }));
+}
+
+#[test]
+fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_attest(deps.as_mut(), EXEC);
+    let id = native_job_until_answered(deps.as_mut());
+    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    // Те же 970 bps: на четверых по 24 250, исполнителю остальное.
+    let paid: u128 = (97_000u128 / 4) * 4;
+    assert!(res.attributes.iter().any(|a| a.key == "settled"
+        && a.value == (PRICE - paid).to_string()));
+    assert_eq!(res.messages.len(), 5);
+    // Проверка по ТИПУ сообщения, а не по отладочной строке: строка —
+    // представление, и меняется она не вместе с поведением.
+    let mut sent = 0u128;
+    for m in &res.messages {
+        match &m.msg {
+            cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+                amount, ..
+            }) => {
+                assert_eq!(amount.len(), 1);
+                assert_eq!(amount[0].denom, NATIVE, "в том самом денoме");
+                sent += amount[0].amount.u128();
+            }
+            other => panic!("выплата не родной монетой: {other:?}"),
+        }
+    }
+    assert_eq!(sent, PRICE, "разошлась вся цена задания, без остатка");
+}
+
+#[test]
+fn rodnoy_vozvrat_zakazchiku_pri_podloge() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_attest(deps.as_mut(), EXEC);
+    let id = native_job_until_answered(deps.as_mut());
+    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "guilty" && a.value == "true"));
+    let dump = format!("{:?}", res.messages);
+    assert!(dump.contains(CLIENT), "заказчику вернули");
+    assert!(dump.contains(STAKE), "залог изъят в своём денoме");
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.stake, Uint128::zero());
+}
+
+#[test]
+fn vid_raschyota_menyaetsya_nastroykoy() {
+    // Переезд расчёта на другую единицу — правка настройки, а не выпуск
+    // нового контракта. При появлении IBC это будет ваучер.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+        ExecuteMsg::UpdateConfig {
+            attestor: None, threshold_micro: None, checks_required: None,
+            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            pinned_dtype: None, conformance_limit_micro: None,
+            conformance_ref: None,
+            settlement: Some(Settlement::Native(NATIVE.into())),
+            stake_denom: None, min_stake: None,
+            verifier_fee_bps: None, forfeit: None,
+        }).unwrap();
+    // Теперь принимается родной платёж, а CW20 — нет.
+    submit_job_native(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CW20, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: CLIENT.into(), amount: Uint128::new(PRICE),
+            msg: to_json_binary(&ReceiveHook::SubmitJob {
+                prompt_hash: "ph".into() }).unwrap(),
+        })).unwrap_err();
+    assert!(matches!(err, ContractError::NotCw20Settlement));
+}
+
+#[test]
+fn imya_edinicy_vidno_v_nastroykah() {
+    // Демону нужно знать, чем расчёт, не разбирая вариант руками.
+    assert_eq!(Settlement::Native(NATIVE.into()).label(), NATIVE);
+    assert_eq!(Settlement::Cw20(Addr::unchecked(CW20)).label(),
+               format!("cw20:{CW20}"));
 }

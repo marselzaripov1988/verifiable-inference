@@ -36,13 +36,29 @@ class Params:
     pinned_model: str
     pinned_runtime: str
     pinned_dtype: str
-    settlement_denom: str
+    #: Чем идёт расчёт: {"native": "uaxm"} либо {"cw20": "axm1…"}.
+    #: Вариантом, а не строкой: контракт умеет оба, и демону надо знать
+    #: не только имя единицы, но и КАК она платится.
+    settlement: dict
     stake_denom: str
     # --- проба на эталонном векторе ---
     conformance_limit_micro: int
     conformance_ref_hash: str
     conformance_lens: tuple
     conformance_version: int
+
+
+def settlement_label(settlement: dict) -> str:
+    """Имя расчётной единицы для вывода. Неизвестный вариант — отказ.
+
+    Умолчание здесь означало бы, что демон молча считает расчёт чем-то
+    своим, а узнается это на выплате.
+    """
+    if "native" in settlement:
+        return settlement["native"]
+    if "cw20" in settlement:
+        return f"cw20:{settlement['cw20']}"
+    raise ChainUnavailable(f"неизвестный вид расчёта: {settlement!r}")
 
 
 def query_smart(rest, contract, query, timeout=20):
@@ -65,7 +81,7 @@ def load_params(rest, contract):
     d = query_smart(rest, contract, {"config": {}})
     need = ("threshold_micro", "checks_required", "min_answer_tokens",
             "pinned_model", "pinned_runtime", "pinned_dtype",
-            "settlement_denom", "stake_denom",
+            "settlement", "stake_denom",
             "conformance_limit_micro", "conformance_ref_hash",
             "conformance_lens", "conformance_version")
     miss = [k for k in need if k not in d]
@@ -78,7 +94,7 @@ def load_params(rest, contract):
         pinned_model=d["pinned_model"],
         pinned_runtime=d["pinned_runtime"],
         pinned_dtype=d["pinned_dtype"],
-        settlement_denom=d["settlement_denom"],
+        settlement=d["settlement"],
         stake_denom=d["stake_denom"],
         conformance_limit_micro=int(d["conformance_limit_micro"]),
         conformance_ref_hash=d["conformance_ref_hash"],

@@ -1,7 +1,7 @@
 use cosmwasm_schema::{cw_serde, QueryResponses};
 use cosmwasm_std::{Binary, Uint128};
 
-use crate::state::{Check, Forfeit, Micro, MicroLog};
+use crate::state::{Check, Forfeit, Micro, MicroLog, Settlement};
 
 #[cw_serde]
 pub struct InstantiateMsg {
@@ -16,9 +16,8 @@ pub struct InstantiateMsg {
     pub conformance_limit_micro: Micro,
     pub conformance_ref_hash: String,
     pub conformance_lens: Vec<u32>,
-    pub settlement_denom: String,
+    pub settlement: Settlement,
     pub stake_denom: String,
-    pub settlement_cw20: String,
     pub min_stake: Uint128,
     pub verifier_fee_bps: u16,
     pub forfeit: Forfeit,
@@ -42,7 +41,7 @@ pub enum ExecuteMsg {
         /// вместе, иначе раскрытую склейку разрежут не по тем границам.
         /// Повышает conformance_version и обнуляет все выданные пробы.
         conformance_ref: Option<ConformanceRef>,
-        settlement_denom: Option<String>,
+        settlement: Option<Settlement>,
         stake_denom: Option<String>,
         min_stake: Option<Uint128>,
         verifier_fee_bps: Option<u16>,
@@ -66,8 +65,11 @@ pub enum ExecuteMsg {
     /// Забрать залог. Нельзя забаненному и нельзя при незакрытых
     /// заданиях: иначе залог уходит ровно перед вердиктом.
     WithdrawStake { amount: Uint128 },
-    /// Приём CW20. Заказчик НЕ вызывает SubmitJob напрямую: расчётный
-    /// BARTR это CW20, и монеты приходят только так — Send на контракт с
+    /// Заказчик ставит задание и платит РОДНОЙ монетой — она приходит с
+    /// транзакцией. Работает только при расчёте Native.
+    SubmitJob { prompt_hash: String },
+    /// Приём CW20. При расчёте Cw20 заказчик НЕ вызывает SubmitJob
+    /// напрямую: монеты приходят только так — Send на контракт с
     /// вложенным сообщением. Это цена того, что расчётная единица не
     /// нативна.
     Receive(Cw20ReceiveMsg),

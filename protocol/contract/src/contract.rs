@@ -10,8 +10,25 @@ use crate::msg::{
 };
 use crate::state::{
     Check, Config, Conformance, Executor, ExecutorStatus, Forfeit, Job, JobState, Micro, MicroLog,
-    CHECKS, CONFIG, EXECUTORS, JOBS, NEXT_JOB,
+    Settlement, CHECKS, CONFIG, EXECUTORS, JOBS, NEXT_JOB,
 };
+
+/// Выплата в единице расчёта. ЕДИНСТВЕННОЕ место, которое знает, чем
+/// идёт расчёт: иначе добавление родной монеты означало бы правку в
+/// каждом месте, где двигаются деньги, и одно из них забылось бы.
+fn pay(cfg: &Config, to: &Addr, amount: Uint128) -> StdResult<CosmosMsg> {
+    match &cfg.settlement {
+        Settlement::Native(denom) => Ok(BankMsg::Send {
+            to_address: to.to_string(),
+            amount: vec![Coin {
+                denom: denom.clone(),
+                amount,
+            }],
+        }
+        .into()),
+        Settlement::Cw20(token) => cw20_transfer(token, to, amount),
+    }
+}
 
 /// Перевод CW20. Собирается вручную: тащить зависимость cw20 ради одного
 /// сообщения незачем, а формат фиксирован стандартом.
@@ -100,9 +117,16 @@ pub fn instantiate(
         conformance_ref_hash: msg.conformance_ref_hash,
         conformance_lens: msg.conformance_lens,
         conformance_version: 1,
-        settlement_denom: msg.settlement_denom,
+        // Адрес CW20 проверяется здесь: в сообщении он приходит как
+        // Addr, а Addr из сообщения НЕ проверен — это известная ловушка
+        // cosmwasm, и неверный адрес иначе всплыл бы при первой выплате.
+        settlement: match msg.settlement {
+            Settlement::Cw20(a) => {
+                Settlement::Cw20(deps.api.addr_validate(a.as_str())?)
+            }
+            native => native,
+        },
         stake_denom: msg.stake_denom,
-        settlement_cw20: deps.api.addr_validate(&msg.settlement_cw20)?,
         min_stake: msg.min_stake,
         verifier_fee_bps: msg.verifier_fee_bps,
         forfeit: msg.forfeit,
@@ -130,7 +154,7 @@ pub fn execute(
             pinned_dtype,
             conformance_limit_micro,
             conformance_ref,
-            settlement_denom,
+            settlement,
             stake_denom,
             min_stake,
             verifier_fee_bps,
@@ -147,7 +171,7 @@ pub fn execute(
             pinned_dtype,
             conformance_limit_micro,
             conformance_ref,
-            settlement_denom,
+            settlement,
             stake_denom,
             min_stake,
             verifier_fee_bps,
@@ -166,6 +190,9 @@ pub fn execute(
         } => set_suspended(deps, info, executor, suspended),
         ExecuteMsg::DepositStake {} => deposit_stake(deps, info),
         ExecuteMsg::WithdrawStake { amount } => withdraw_stake(deps, info, amount),
+        ExecuteMsg::SubmitJob { prompt_hash } => {
+            submit_job_native(deps, info, prompt_hash)
+        }
         ExecuteMsg::Receive(r) => receive_cw20(deps, info, r),
         ExecuteMsg::SubmitConformance {
             divergence_micro,
@@ -211,7 +238,7 @@ fn update_config(
     pinned_dtype: Option<String>,
     conformance_limit_micro: Option<Micro>,
     conformance_ref: Option<ConformanceRef>,
-    settlement_denom: Option<String>,
+    settlement: Option<Settlement>,
     stake_denom: Option<String>,
     min_stake: Option<Uint128>,
     verifier_fee_bps: Option<u16>,
@@ -266,8 +293,13 @@ fn update_config(
     if rotate {
         cfg.conformance_version += 1;
     }
-    if let Some(d) = settlement_denom {
-        cfg.settlement_denom = d;
+    if let Some(st) = settlement {
+        cfg.settlement = match st {
+            Settlement::Cw20(a) => {
+                Settlement::Cw20(deps.api.addr_validate(a.as_str())?)
+            }
+            native => native,
+        };
     }
     if let Some(d) = stake_denom {
         cfg.stake_denom = d;
@@ -483,9 +515,15 @@ fn receive_cw20(
     let cfg = CONFIG.load(deps.storage)?;
     // Вызов обязан прийти ОТ контракта расчётной единицы: иначе любой
     // мог бы объявить задание оплаченным своим токеном.
-    if info.sender != cfg.settlement_cw20 {
+    let token = match &cfg.settlement {
+        Settlement::Cw20(t) => t.clone(),
+        // При расчёте родной монетой платёж CW20 заданием не становится:
+        // иначе задание оказалось бы оплачено не тем, чем платят все.
+        Settlement::Native(_) => return Err(ContractError::NotCw20Settlement),
+    };
+    if info.sender != token {
         return Err(ContractError::WrongCw20 {
-            want: cfg.settlement_cw20.to_string(),
+            want: token.to_string(),
             got: info.sender.to_string(),
         });
     }
@@ -495,31 +533,82 @@ fn receive_cw20(
     match from_json(&r.msg)? {
         ReceiveHook::SubmitJob { prompt_hash } => {
             let client = deps.api.addr_validate(&r.sender)?;
-            let id = NEXT_JOB.load(deps.storage)?;
-            JOBS.save(
-                deps.storage,
-                id,
-                &Job {
-                    client,
-                    prompt_hash,
-                    executor: None,
-                    state: JobState::Open,
-                    answer_hash: None,
-                    logprobs_hash: None,
-                    answer_tokens: None,
-                    guilty: None,
-                    reveal_verified: None,
-                    price: r.amount,
-                    paid: false,
-                },
-            )?;
-            NEXT_JOB.save(deps.storage, &(id + 1))?;
-            Ok(Response::new()
-                .add_attribute("action", "submit_job")
-                .add_attribute("job_id", id.to_string())
-                .add_attribute("price", r.amount.to_string()))
+            create_job(deps, client, prompt_hash, r.amount)
         }
     }
+}
+
+/// Поставить задание. Одна сборка на оба вида расчёта: раздвоив её, я
+/// бы раздвоил и жизненный цикл задания.
+fn create_job(
+    deps: DepsMut,
+    client: Addr,
+    prompt_hash: String,
+    price: Uint128,
+) -> Result<Response, ContractError> {
+    let id = NEXT_JOB.load(deps.storage)?;
+    JOBS.save(
+        deps.storage,
+        id,
+        &Job {
+            client,
+            prompt_hash,
+            executor: None,
+            state: JobState::Open,
+            answer_hash: None,
+            logprobs_hash: None,
+            answer_tokens: None,
+            guilty: None,
+            reveal_verified: None,
+            price,
+            paid: false,
+        },
+    )?;
+    NEXT_JOB.save(deps.storage, &(id + 1))?;
+    Ok(Response::new()
+        .add_attribute("action", "submit_job")
+        .add_attribute("job_id", id.to_string())
+        .add_attribute("price", price.to_string()))
+}
+
+/// Задание, оплаченное РОДНОЙ монетой: она приходит с транзакцией.
+fn submit_job_native(
+    deps: DepsMut,
+    info: MessageInfo,
+    prompt_hash: String,
+) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+    let denom = match &cfg.settlement {
+        Settlement::Native(d) => d.clone(),
+        // При расчёте CW20 монеты приходят только через Receive, и
+        // принимать их ещё и так значило бы два пути для одних денег.
+        Settlement::Cw20(t) => {
+            return Err(ContractError::NotNativeSettlement {
+                want: t.to_string(),
+            })
+        }
+    };
+    // Ровно одна монета и ровно того денoma. Чужая монета рядом с нужной
+    // осталась бы в контракте навсегда: вернуть её некому и нечем.
+    let paid: Uint128 = info
+        .funds
+        .iter()
+        .filter(|c| c.denom == denom)
+        .map(|c| c.amount)
+        .sum();
+    if info.funds.len() != 1 || paid.is_zero() {
+        let got = if info.funds.is_empty() {
+            "ничего".to_string()
+        } else {
+            info.funds
+                .iter()
+                .map(|c| format!("{}{}", c.amount, c.denom))
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        return Err(ContractError::WrongSettlementFunds { want: denom, got });
+    }
+    create_job(deps, info.sender, prompt_hash, paid)
 }
 
 fn active_executor(deps: &DepsMut, who: &Addr) -> Result<Executor, ContractError> {
@@ -874,7 +963,7 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
     let share = fee_total / Uint128::from(checks.len() as u128);
     if !share.is_zero() {
         for c in &checks {
-            msgs.push(cw20_transfer(&cfg.settlement_cw20, &c.checker, share)?);
+            msgs.push(pay(&cfg, &c.checker, share)?);
         }
     }
     // Остаток от целочисленного деления остаётся на контракте, а не
@@ -888,7 +977,7 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
         // Заказчику возвращается всё, кроме платы за проверки: ответ он
         // получил негодный, но проверка работу сделала.
         if !rest.is_zero() {
-            msgs.push(cw20_transfer(&cfg.settlement_cw20, &job.client, rest)?);
+            msgs.push(pay(&cfg, &job.client, rest)?);
         }
         // Изъятие залога. Проверяющим он не достаётся ни при каком
         // устройстве настроек — варианта такого нет.
@@ -916,7 +1005,7 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
     } else {
         e.jobs_done += 1;
         if !rest.is_zero() {
-            msgs.push(cw20_transfer(&cfg.settlement_cw20, &executor, rest)?);
+            msgs.push(pay(&cfg, &executor, rest)?);
         }
     }
     EXECUTORS.save(deps.storage, &executor, &e)?;
