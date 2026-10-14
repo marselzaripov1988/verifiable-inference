@@ -75,6 +75,10 @@ class ChainRPC:
     #: По какому ключу искать в индексе. Составной ключ — это
     #: `<тип события>.<атрибут>`, поэтому у разных банков он разный.
     search_event = EVENT_TRANSFER
+    #: Префикс адресов сети. Нужен, чтобы отвергнуть адрес казны из
+    #: ДРУГОЙ сети: он выглядит правильным и проходит контрольную сумму,
+    #: но платежи ждали бы не там, где их переведут.
+    hrp = "artr"
 
     def __init__(self, endpoint: str = "http://localhost:26657", timeout: float = 10.0):
         self.endpoint = endpoint.rstrip("/")
@@ -289,6 +293,7 @@ class ArteryRPC(ChainRPC):
     denom = "uartr"
     events = (EVENT_TRANSFER, EVENT_TRANSFER_STOCK)
     search_event = EVENT_TRANSFER
+    hrp = "artr"
 
 
 class AxiomeRPC(ChainRPC):
@@ -310,3 +315,4 @@ class AxiomeRPC(ChainRPC):
     #: Проверено на живой сети, вместе с index=true у атрибутов.
     events = (EVENT_TRANSFER_STOCK,)
     search_event = EVENT_TRANSFER_STOCK
+    hrp = "axm"

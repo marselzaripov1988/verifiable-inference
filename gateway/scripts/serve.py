@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from artery_gateway import inference, server  # noqa: E402
+from artery_gateway.bech32 import BadAddress, check  # noqa: E402
 from artery_gateway.chain import ArteryRPC, AxiomeRPC  # noqa: E402
 from artery_gateway.ledger import Ledger  # noqa: E402
 from artery_gateway.pricing import Pricing  # noqa: E402
@@ -54,6 +55,17 @@ def main() -> int:
                          "чтобы проверить приём платежей без карты")
     a = ap.parse_args()
 
+    rpc_class = AxiomeRPC if a.chain == "axiome" else ArteryRPC
+    # Адрес казны проверяется ДО всего остального. Опечатка в нём дала бы
+    # адрес, на который никто не переводит: шлюз исправно опрашивал бы
+    # цепочку, исправно не находил платежей — и это выглядело бы
+    # отсутствием спроса, а не ошибкой настройки.
+    try:
+        treasury = check(a.treasury, rpc_class.hrp)
+    except BadAddress as e:
+        print(f"АДРЕС КАЗНЫ НЕ ГОДИТСЯ: {e}", file=sys.stderr)
+        return 1
+
     led = Ledger(a.ledger)
     if a.from_height and not led.height:
         led.height = a.from_height - 1
@@ -62,8 +74,8 @@ def main() -> int:
     gw = server.Gateway(
         ledger=led,
         pricing=Pricing(price_micro_per_million=a.price),
-        treasury=a.treasury,
-        rpc=(AxiomeRPC if a.chain == "axiome" else ArteryRPC)(a.rpc),
+        treasury=treasury,
+        rpc=rpc_class(a.rpc),
         base_url=a.base_url,
         model=a.model,
     )
