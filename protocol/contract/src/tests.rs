@@ -594,7 +594,7 @@ fn prava_razdeleny() {
         mock_env(),
         mock_info(ATTESTOR, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None,
+            admin: None, attestor: None,
             threshold_micro: Some(1),
             checks_required: None,
             min_answer_tokens: None,
@@ -956,7 +956,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None,
@@ -995,7 +995,7 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
     setup(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None,
@@ -1097,7 +1097,7 @@ fn smena_svyazki_obnulyaet_probu() {
     // Порог измерен для связки; сменили связку — все пробы о прежней.
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None,
             pinned_runtime: Some("vllm-0.32.0".into()), pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
@@ -1117,7 +1117,7 @@ fn smena_etalona_obnulyaet_probu() {
     submit_job(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: Some(ConformanceRef {
@@ -1142,7 +1142,7 @@ fn zapis_toy_zhe_svyazki_probu_ne_obnulyaet() {
     submit_job(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: Some(MODEL.into()),
             pinned_runtime: Some(RUNTIME.into()), pinned_dtype: Some(DTYPE.into()),
             conformance_limit_micro: Some(CONF_LIMIT),
@@ -1371,7 +1371,7 @@ fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
     // Сменили эталон — проба проверяющего больше не о действующей настройке.
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: Some(ConformanceRef {
@@ -1592,7 +1592,7 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None,
@@ -1732,7 +1732,7 @@ fn povyshenie_doli_ne_urezaet_vyruchku_ispolnitelya() {
     let id = native_job_until_answered(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            attestor: None, threshold_micro: None, checks_required: None,
+            admin: None, attestor: None, threshold_micro: None, checks_required: None,
             min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None, settlement: None, stake_denom: None,
@@ -1801,4 +1801,44 @@ fn pri_podloge_zakazchiku_vozvrashchaetsya_cena_a_ne_vsyo() {
         && a.value == FEE.to_string()), "проверяющим заплатили");
     assert!(res.attributes.iter().any(|a| a.key == "settled"
         && a.value == PRICE.to_string()), "заказчику вернулась цена");
+}
+
+#[test]
+fn administratora_mozhno_smenit() {
+    // Без этого потеря ключа навсегда замораживает ВСЕ параметры: ни
+    // порог, ни эталон пробы, ни долю уже не поправить. Особенно важно,
+    // когда ключ лежит в файле, а не в кошельке с резервной копией.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let new_admin = "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67";
+    execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+        ExecuteMsg::UpdateConfig {
+            admin: Some(new_admin.into()), attestor: None,
+            threshold_micro: None, checks_required: None,
+            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            pinned_dtype: None, conformance_limit_micro: None,
+            conformance_ref: None, settlement: None, stake_denom: None,
+            min_stake: None, verifier_fee_bps: None, forfeit: None,
+        }).unwrap();
+    // Прежний администратор больше ничего не правит.
+    let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+        ExecuteMsg::UpdateConfig {
+            admin: None, attestor: None, threshold_micro: Some(1),
+            checks_required: None, min_answer_tokens: None,
+            pinned_model: None, pinned_runtime: None, pinned_dtype: None,
+            conformance_limit_micro: None, conformance_ref: None,
+            settlement: None, stake_denom: None, min_stake: None,
+            verifier_fee_bps: None, forfeit: None,
+        }).unwrap_err();
+    assert!(matches!(err, ContractError::NotAdmin));
+    // А новый — правит.
+    execute(deps.as_mut(), mock_env(), mock_info(new_admin, &[]),
+        ExecuteMsg::UpdateConfig {
+            admin: None, attestor: None, threshold_micro: Some(40_000),
+            checks_required: None, min_answer_tokens: None,
+            pinned_model: None, pinned_runtime: None, pinned_dtype: None,
+            conformance_limit_micro: None, conformance_ref: None,
+            settlement: None, stake_denom: None, min_stake: None,
+            verifier_fee_bps: None, forfeit: None,
+        }).unwrap();
 }

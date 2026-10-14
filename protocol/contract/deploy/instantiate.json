@@ -1,6 +1,6 @@
 {
- "admin": "axm1ЗАМЕНИТЬ_НА_ВАШ_АДРЕС",
- "attestor": "axm1ЗАМЕНИТЬ_НА_ВАШ_АДРЕС",
+ "admin": "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67",
+ "attestor": "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67",
  "threshold_micro": 36000,
  "checks_required": 4,
  "min_answer_tokens": 32,
@@ -52,6 +52,6 @@
  "min_stake": "30400000000",
  "verifier_fee_bps": 970,
  "forfeit": {
-  "to_address": "axm1ЗАМЕНИТЬ_КУДА_УХОДИТ_КОНФИСКАТ"
+  "to_address": "axm1232gmxu2pf4rz95re4e3da8dxdaj7pfyhn8hmu"
  }
 }

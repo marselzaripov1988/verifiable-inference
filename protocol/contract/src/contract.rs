@@ -156,6 +156,7 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::UpdateConfig {
+            admin,
             attestor,
             threshold_micro,
             checks_required,
@@ -173,6 +174,7 @@ pub fn execute(
         } => update_config(
             deps,
             info,
+            admin,
             attestor,
             threshold_micro,
             checks_required,
@@ -240,6 +242,7 @@ pub fn execute(
 fn update_config(
     deps: DepsMut,
     info: MessageInfo,
+    admin: Option<String>,
     attestor: Option<String>,
     threshold_micro: Option<Micro>,
     checks_required: Option<u32>,
@@ -258,6 +261,11 @@ fn update_config(
     let mut cfg = CONFIG.load(deps.storage)?;
     if info.sender != cfg.admin {
         return Err(ContractError::NotAdmin);
+    }
+    // Смена администратора. Передаётся последней правкой: после неё
+    // править настройки сможет только новый адрес.
+    if let Some(a) = admin {
+        cfg.admin = deps.api.addr_validate(&a)?;
     }
     if let Some(a) = attestor {
         cfg.attestor = deps.api.addr_validate(&a)?;
