@@ -1,0 +1,122 @@
+{
+ "label": "live-RTX-4090 против записанных A100 и 3090",
+ "model": "Qwen/Qwen2.5-7B-Instruct",
+ "card": "NVIDIA GeForce RTX 4090",
+ "driver": "580.159.03",
+ "runtime": "vllm-0.31.0",
+ "dtype": "bfloat16",
+ "date": "2026-10-13",
+ "note": "Первый замер, снятый ТЕМ ЖЕ кодом, которым считает проверяющий (protocol/daemon). Оценивался ровно тот текст, что в записанных замерах: он восстановлен склейкой сохранённых токенов.",
+ "repeatability": {
+  "compiled_vs_compiled2": {
+   "n": 40,
+   "mean": 0,
+   "median": 0,
+   "max": 0,
+   "over_threshold_36000": 0,
+   "bit_identical": 40
+  },
+  "eager_vs_eager2": {
+   "n": 40,
+   "mean": 36655,
+   "median": 0,
+   "max": 402116,
+   "over_threshold_36000": 7,
+   "bit_identical": 29
+  },
+  "eager2_vs_compiled2": {
+   "n": 40,
+   "mean": 49424,
+   "median": 19692,
+   "max": 457948,
+   "over_threshold_36000": 7,
+   "bit_identical": 0
+  }
+ },
+ "crosscard_all_40": {
+  "a100": {
+   "n": 40,
+   "mean": 15002,
+   "median": 13148,
+   "max": 39892,
+   "over_threshold_36000": 1
+  },
+  "3090": {
+   "n": 40,
+   "mean": 14350,
+   "median": 13582,
+   "max": 33617,
+   "over_threshold_36000": 0
+  }
+ },
+ "crosscard_eager_all_40": {
+  "a100": {
+   "n": 40,
+   "mean": 48738,
+   "median": 19618,
+   "max": 468807,
+   "over_threshold_36000": 5
+  },
+  "3090": {
+   "n": 40,
+   "mean": 48778,
+   "median": 18892,
+   "max": 465688,
+   "over_threshold_36000": 7
+  }
+ },
+ "excluded_short_answers": {
+  "rule": "min_answer_tokens = 32: контракт отклоняет задание с более коротким ответом",
+  "prompts": [
+   "What year did the Berlin Wall fall",
+   "Одной строкой SQL",
+   "What is the capital of France",
+   "Назови химический символ золота",
+   "Name four HTTP methods",
+   "What is the difference between TCP and U"
+  ],
+  "note": "Длины ответов сняты токенизатором сервера (/tokenize) во время замера: 5, 5, 7, 11, 23 и 25 токенов. Все превышения порога честной парой пришлись на них."
+ },
+ "crosscard_eligible_34": {
+  "a100": {
+   "n": 34,
+   "mean": 13297,
+   "median": 12448,
+   "max": 19656,
+   "over_threshold_36000": 0,
+   "over_fraud_min_37780": 0
+  },
+  "3090": {
+   "n": 34,
+   "mean": 12954,
+   "median": 12818,
+   "max": 20137,
+   "over_threshold_36000": 0,
+   "over_fraud_min_37780": 0
+  }
+ },
+ "crosscard_eligible_34_eager": {
+  "a100": {
+   "n": 34,
+   "mean": 39473,
+   "median": 18258,
+   "max": 413488,
+   "over_threshold_36000": 4,
+   "over_fraud_min_37780": 4
+  },
+  "3090": {
+   "n": 34,
+   "mean": 39117,
+   "median": 18322,
+   "max": 410784,
+   "over_threshold_36000": 4,
+   "over_fraud_min_37780": 4
+  }
+ },
+ "verdict": {
+  "честная пара, пригодные задания": "максимум 20137 при пороге 36000 и минимуме подлога 37780",
+  "воспроизводимость": "скомпилированный путь 40/40 побитово; --enforce-eager 29/40 — негоден",
+  "прибитая тройка недостаточна": "режим исполнения сдвигает расхождение до 49424 в среднем, то есть выше полосы подлога, оставаясь той же моделью, версией и dtype",
+  "nan": "vLLM 0.31.0 отказывается отдать свой ответ при NaN в логвероятностях: 34 текста из 40 с первой попытки на скомпилированном пути; повторы сходятся к воспроизводимому вектору"
+ }
+}

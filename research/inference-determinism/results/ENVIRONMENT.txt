@@ -1,0 +1,16 @@
+Welcome to vast.ai. If authentication fails, try again after a few seconds, and double check your ssh key.
+Have fun!
+NVIDIA GeForce RTX 3090, 595.71.05
+vllm 0.30.0 torch 2.13.0+cu130
+NVIDIA GeForce RTX 4090, 610.43.02, 8.9
+vllm 0.30.0 torch 2.13.0+cu130
+NVIDIA GeForce RTX 3090, 580.126.09
+vllm 0.14.0 torch 2.9.1+cu129
+NVIDIA GeForce RTX 4090, 590.48.01
+vllm 0.30.0 torch 2.13.0+cu130 | два сервера, 0.40 памяти каждому
+NVIDIA GeForce RTX 3090, 595.71.05, 250.00 W, 400.00 W
+vllm 0.30.0 | выдержка: Qwen2.5-7B bf16, 2 ч, 91875 проходов, 0 отклонений
+NVIDIA GeForce RTX 3090, 595.71.05, 250.00 W
+vllm 0.30.0 | пропускная: Qwen2.5-7B bf16, 128 токенов на запрос
+NVIDIA GeForce RTX 4090, 8.9, 595.45.04
+vllm 0.31.0 torch 2.13.0+cu130

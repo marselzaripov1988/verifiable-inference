@@ -1,0 +1,67 @@
+{
+ "model": "Qwen/Qwen2.5-7B-Instruct",
+ "max_tokens": 128,
+ "seconds_per_level": 30,
+ "levels": [
+  {
+   "concurrency": 1,
+   "elapsed": 31.76,
+   "requests": 12,
+   "tokens": 1536,
+   "errors": 0,
+   "tokens_per_sec": 48.36948553213992,
+   "latency_mean": 2.6462493404978886,
+   "latency_p95": 2.6210378441028297
+  },
+  {
+   "concurrency": 2,
+   "elapsed": 31.94,
+   "requests": 24,
+   "tokens": 3072,
+   "errors": 0,
+   "tokens_per_sec": 96.19100251522728,
+   "latency_mean": 2.66048305547641,
+   "latency_p95": 2.6647667579818517
+  },
+  {
+   "concurrency": 4,
+   "elapsed": 32.25,
+   "requests": 48,
+   "tokens": 6144,
+   "errors": 0,
+   "tokens_per_sec": 190.5040832888681,
+   "latency_mean": 2.6870006138439444,
+   "latency_p95": 2.7197362610604614
+  },
+  {
+   "concurrency": 8,
+   "elapsed": 30.2,
+   "requests": 88,
+   "tokens": 11264,
+   "errors": 0,
+   "tokens_per_sec": 372.9773223252136,
+   "latency_mean": 2.7439923281675545,
+   "latency_p95": 2.750273257959634
+  },
+  {
+   "concurrency": 16,
+   "elapsed": 31.57,
+   "requests": 176,
+   "tokens": 22528,
+   "errors": 0,
+   "tokens_per_sec": 713.5562842282814,
+   "latency_mean": 2.8678542287578406,
+   "latency_p95": 2.8778922520577908
+  },
+  {
+   "concurrency": 32,
+   "elapsed": 32.93,
+   "requests": 352,
+   "tokens": 45056,
+   "errors": 0,
+   "tokens_per_sec": 1368.0986910338097,
+   "latency_mean": 2.982766559034644,
+   "latency_p95": 3.0219908580183983
+  }
+ ]
+}

@@ -1,0 +1,144 @@
+{
+ "note": "Настоящие сделки axiome-1, снятые 14 октября 2026 с публичного RPC api-chain.axiomechain.org (из реестра цепочек Cosmos). Образец нужен затем, что разбор платежей обязан проверяться против того, что отдаёт цепочка, а не против представлений о её формате.",
+ "chain_id": "axiome-1",
+ "cometbft": "0.38.5",
+ "recipient_searched": "axm1l0a927clmz7wqmls2737ctwlxzhxeqmxaf55w7",
+ "total_count": "57",
+ "txs": [
+  {
+   "hash": "DEA331F40F89AEA935EDF7B14630CE6D96591EA44D644E01DC699A5CBE0CD7BD",
+   "height": "11771037",
+   "tx": "CvwCCpoBCjcvYXhpb21lLmRpc3RyaWJ1dGlvbi52MWJldGExLk1zZ1dpdGhkcmF3RGVsZWdhdG9yUmV3YXJkEl8KKmF4bTFsMGE5MjdjbG16N3dxbWxzMjczN2N0d2x4emh4ZXFteGFmNTV3NxIxYXhtdmFsb3BlcjFsMGE5MjdjbG16N3dxbWxzMjczN2N0d2x4emh4ZXFteGhxc3praAqKAQocL2Nvc21vcy5iYW5rLnYxYmV0YTEuTXNnU2VuZBJqCipheG0xbDBhOTI3Y2xtejd3cW1sczI3MzdjdHdseHpoeGVxbXhhZjU1dzcSKmF4bTF0cXV5bjdtMmthNnlnanEyYXprc2hsbWx2a2ZudGFzMjZyaDluZRoQCgR1YXhtEgg4ODY5NjUyOBJQ0JLQvtC30L3QsNCz0YDQsNC20LTQtdC90LjRjyDQsNC60LrQsNGD0L3RgtCwINCy0LDQu9C40LTQsNGC0L7RgNCwIDEwMCVDQVNIQkFDSyESaQpRCkYKHy9jb3Ntb3MuY3J5cHRvLnNlY3AyNTZrMS5QdWJLZXkSIwohA5JseCnqy18NlBXUfxfK2SQZmDvgKbeBqaKErZ177y8zEgQKAggBGIwEEhQKDgoEdWF4bRIGMzU2OTM5EKzoDBpAyBEluCRw8jqghVWj9Lkz9i7xizeCWILmosvrmH6FcW4LuOH2nl+raAeZ7/f0sRYsjVfuDTxJ6TpmRVdp7LIHyQ==",
+   "tx_result": {
+    "code": 0,
+    "events": [
+     {
+      "type": "transfer",
+      "attributes": [
+       {
+        "key": "recipient",
+        "value": "axm17xpfvakm2amg962yls6f84z3kell8c5ly3he46",
+        "index": true
+       },
+       {
+        "key": "sender",
+        "value": "axm1l0a927clmz7wqmls2737ctwlxzhxeqmxaf55w7",
+        "index": true
+       },
+       {
+        "key": "amount",
+        "value": "356939uaxm",
+        "index": true
+       }
+      ]
+     },
+     {
+      "type": "transfer",
+      "attributes": [
+       {
+        "key": "recipient",
+        "value": "axm1l0a927clmz7wqmls2737ctwlxzhxeqmxaf55w7",
+        "index": true
+       },
+       {
+        "key": "sender",
+        "value": "axm1jv65s3grqf6v6jl3dp4t6c9t9rk99cd8nhs9hc",
+        "index": true
+       },
+       {
+        "key": "amount",
+        "value": "93702693uaxm",
+        "index": true
+       },
+       {
+        "key": "msg_index",
+        "value": "0",
+        "index": true
+       }
+      ]
+     },
+     {
+      "type": "transfer",
+      "attributes": [
+       {
+        "key": "recipient",
+        "value": "axm1tquyn7m2ka6ygjq2azkshlmlvkfntas26rh9ne",
+        "index": true
+       },
+       {
+        "key": "sender",
+        "value": "axm1l0a927clmz7wqmls2737ctwlxzhxeqmxaf55w7",
+        "index": true
+       },
+       {
+        "key": "amount",
+        "value": "88696528uaxm",
+        "index": true
+       },
+       {
+        "key": "msg_index",
+        "value": "1",
+        "index": true
+       }
+      ]
+     }
+    ]
+   }
+  },
+  {
+   "hash": "FA74BDFDE2D0042B98FC1F9FF6ABB08F38A63104D3F14C0C98B98D71A98955DF",
+   "height": "11777288",
+   "tx": "CpABCo0BChwvY29zbW9zLmJhbmsudjFiZXRhMS5Nc2dTZW5kEm0KKmF4bTF1cWs5czdndHhuNmR6a21lazlyNzg1c3o1eGczbHQ0eTU3cjI3dxIqYXhtMWwwYTkyN2NsbXo3d3FtbHMyNzM3Y3R3bHh6aHhlcW14YWY1NXc3GhMKBHVheG0SCzIwMDAwMDAwMDAwEmkKUQpGCh8vY29zbW9zLmNyeXB0by5zZWNwMjU2azEuUHViS2V5EiMKIQOvnr6tPz8L6UVlVcj5ddocrYGfsXJcUV1n3PKoeqVrwBIECgIIARjQDhIUCg4KBHVheG0SBjI1NjY0MBDynQQaQPnTEbbTvPDEzapNQGCfQFjjPP/iEB5r+lQwThAM63ZDE48b9pFH/zsCOeZOVpeeNoQYaNvy+RwRMN7vM3CVPuQ=",
+   "tx_result": {
+    "code": 0,
+    "events": [
+     {
+      "type": "transfer",
+      "attributes": [
+       {
+        "key": "recipient",
+        "value": "axm17xpfvakm2amg962yls6f84z3kell8c5ly3he46",
+        "index": true
+       },
+       {
+        "key": "sender",
+        "value": "axm1uqk9s7gtxn6dzkmek9r785sz5xg3lt4y57r27w",
+        "index": true
+       },
+       {
+        "key": "amount",
+        "value": "256640uaxm",
+        "index": true
+       }
+      ]
+     },
+     {
+      "type": "transfer",
+      "attributes": [
+       {
+        "key": "recipient",
+        "value": "axm1l0a927clmz7wqmls2737ctwlxzhxeqmxaf55w7",
+        "index": true
+       },
+       {
+        "key": "sender",
+        "value": "axm1uqk9s7gtxn6dzkmek9r785sz5xg3lt4y57r27w",
+        "index": true
+       },
+       {
+        "key": "amount",
+        "value": "20000000000uaxm",
+        "index": true
+       },
+       {
+        "key": "msg_index",
+        "value": "0",
+        "index": true
+       }
+      ]
+     }
+    ]
+   }
+  }
+ ]
+}

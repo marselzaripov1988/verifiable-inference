@@ -1,0 +1,42 @@
+[package]
+name = "inference-registry"
+version = "0.1.0"
+edition = "2021"
+
+# CosmWasm 1.x, не 2.x. У Axiome wasmd v0.50.0 с wasmvm 1.5.0, а набор
+# объявленных возможностей — iterator, staking, distribution,
+# cosmwasm_1_1..1_4. Возможности cosmwasm_2_0 там НЕТ, то есть контракт
+# на 2.x цепочка не примет при загрузке. Проверено по app.go их узла.
+[dependencies]
+cosmwasm-std = { version = "1.5", features = ["iterator"] }
+cosmwasm-schema = "1.5"
+cw-storage-plus = "1.2"
+thiserror = "1.0"
+# Для сверки раскрытого вектора с обязательством. В дереве уже есть
+# транзитивно через cosmwasm-crypto, здесь — прямой зависимостью.
+sha2 = "0.10"
+
+# Прижата намеренно. Приходит транзитивно через k256 -> ecdsa -> der, и
+# версии от 1.7 требуют edition2024, которого нет в Rust 1.78 внутри
+# штатного сборщика cosmwasm/optimizer. Без этой строки собирается
+# локально и падает в сборщике — то есть ровно там, где делается
+# артефакт для загрузки в цепочку.
+base64ct = "=1.6.0"
+zeroize = "=1.8.1"
+
+[dev-dependencies]
+cosmwasm-std = { version = "1.5", features = ["iterator", "cosmwasm_1_4"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "z"
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+incremental = false
+overflow-checks = true

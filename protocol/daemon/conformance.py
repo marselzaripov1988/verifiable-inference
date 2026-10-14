@@ -1,0 +1,202 @@
+#!/usr/bin/env python3
+"""Проба на эталонном векторе: сверка связки ПО ПОВЕДЕНИЮ, а не по именам.
+
+Зачем она. Контракт прибивает тройку модель/рантайм/dtype и отклоняет
+чужую при регистрации. Замер на живом 4090 показал, что этого мало: на
+одной и той же карте, с той же моделью, той же версией vLLM и тем же
+dtype, `--enforce-eager` против пути по умолчанию дал ни одного
+побитового совпадения из 40 векторов и расхождение до 413 488 микродолей
+— внутри полосы подлога (минимум подлога FP8 37 780). То есть честный
+узел в неверном режиме исполнения выглядит жуликом, и все три имени у
+него при этом правильные. Сверять имена значит проверять то, что узел
+о себе СКАЗАЛ.
+
+Как устроена проба. В цепочке лежит обязательство эталонным набором
+(хэш склейки эталонных векторов), длины текстов и предел. Сами векторы
+вне цепочки — 3 948 чисел — тем же приёмом, что и вектор задания. Узел
+оценивает те же тексты, считает расхождение с эталоном и публикует
+максимум вместе с обязательством СВОИМИ векторами. Соврать можно —
+расхождение он считает сам, — но обязательство делает ложь
+опровержимой: любой раскрывает оба набора, контракт пересчитывает и
+банит совравшего.
+
+Почему максимум по текстам, а не среднее по склейке. Неверный режим
+портит РЕДКИЕ тексты: у eager 29 векторов из 40 совпали с собой
+побитово, а остальные разошлись до 413 488. Среднее по склейке такую
+порчу размывает — замерено, что зазор падает с 20x до 1,5x, и жулик
+пробу проходит. Максимум по текстам даёт честные 20 137 против 413 488.
+
+Чего проба не знает: карт, кроме трёх замеренных (4090, A100, 3090).
+Узел на H100 может честно разойтись сильнее предела. Поэтому предел —
+параметр цепочки, а не константа здесь.
+"""
+
+import argparse
+import json
+import os
+import sys
+
+import canon
+import chain
+import vllm_client as vllm
+
+#: Эталон рядом с демоном. Это не источник истины: истина — обязательство
+#: в цепочке, и файл сверяется с ним перед работой.
+PROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "probe", "probe.json")
+
+
+class ProbeMismatch(Exception):
+    """Эталонный набор не тот, которым обязалась цепочка."""
+
+
+def load_probe(path=PROBE_PATH, params=None):
+    """Прочитать эталон и СВЕРИТЬ его с обязательством из цепочки.
+
+    Без сверки подменённый файл эталона давал бы любую пробу: узел
+    сравнивал бы себя с собой. Поэтому расхождение здесь — отказ.
+    """
+    with open(path, encoding="utf-8") as f:
+        probe = json.load(f)
+    ref = probe["ref"]
+    lens = [len(v) for v in ref]
+    if lens != list(probe["lens"]):
+        raise ProbeMismatch(
+            f"длины в файле не сходятся с векторами: {probe['lens']} против {lens}")
+    glued = [x for v in ref for x in v]
+    got = canon.commit_hash(glued)
+    if got != probe["ref_hash"]:
+        raise ProbeMismatch(
+            f"файл эталона испорчен: хэш {got}, в файле {probe['ref_hash']}")
+    if params is not None:
+        if got != params.conformance_ref_hash:
+            raise ProbeMismatch(
+                "эталон не тот, которым обязалась цепочка:\n"
+                f"  в файле:  {got}\n  в цепочке: {params.conformance_ref_hash}")
+        if tuple(lens) != tuple(params.conformance_lens):
+            raise ProbeMismatch(
+                f"границы текстов не те: в файле {lens}, "
+                f"в цепочке {list(params.conformance_lens)}")
+    return probe
+
+
+def max_per_text(reference, mine, lens):
+    """Максимум среднего расхождения ПО ТЕКСТАМ.
+
+    Считается так же, как в контракте: тот же порядок, то же деление
+    вниз, та же нарезка по длинам. Расходиться им нельзя — контракт
+    пересчитает при споре.
+    """
+    want = sum(lens)
+    for name, v in (("эталон", reference), ("свой", mine)):
+        if len(v) != want:
+            raise canon.EmptyVector(
+                f"{name} набор длиной {len(v)}, эталон требует {want}")
+    worst, at, per = 0, 0, []
+    for n in lens:
+        d = canon.divergence_micro(reference[at:at + n], mine[at:at + n])
+        per.append(d)
+        worst = max(worst, d)
+        at += n
+    return worst, per
+
+
+def run(base, model, params=None, dtype="bfloat16", probe_path=PROBE_PATH):
+    """Пройти пробу. Возвращает None, если узел работать не должен."""
+    if params is not None:
+        try:
+            actual = chain.normalize_runtime(vllm.server_version(base))
+            bad = chain.check_node_matches(params, model, actual, dtype)
+        except vllm.VersionUnknown as e:
+            bad = [f"версию рантайма определить не удалось: {e}"]
+        if bad:
+            for b in bad:
+                print(f"ОТКАЗ: {b}", file=sys.stderr)
+            return None
+    # Узел, не повторяющий сам себя, пробу проходить не должен: его
+    # собственные числа ничего не значат.
+    if not vllm.self_check(base, model):
+        print("ОТКАЗ: узел не повторяет сам себя — префикс-кеш не отключён "
+              "или включена выборка.", file=sys.stderr)
+        return None
+
+    probe = load_probe(probe_path, params)
+    lens = [len(v) for v in probe["ref"]]
+    reference = [x for v in probe["ref"] for x in v]
+
+    mine = []
+    for i, text in enumerate(probe["texts"]):
+        v = canon.require_nonempty(canon.to_micro(vllm.score(base, model, text)))
+        if len(v) != lens[i]:
+            # Оценивается готовый текст, обрываться ему негде. Другая
+            # длина значит, что оценивалось не то: другой токенизатор,
+            # другая модель. Это отказ, а не повод сравнивать общую часть.
+            print(f"ОТКАЗ: текст {i} дал {len(v)} чисел, эталон {lens[i]}. "
+                  "Оценивается не то — модель или токенизатор другие.",
+                  file=sys.stderr)
+            return None
+        mine += v
+
+    worst, per = max_per_text(reference, mine, lens)
+    limit = params.conformance_limit_micro if params else None
+    if limit is not None and worst > limit:
+        over = [i for i, d in enumerate(per) if d > limit]
+        print(f"ОТКАЗ: проба не пройдена. Максимум {worst} при пределе {limit}, "
+              f"превышен на текстах {over}.\n"
+              "  Это НЕ обязательно подлог: честный узел на карте, которой не "
+              "было в замерах, может разойтись сильнее. Но работать с таким "
+              "порогом нельзя — он для другой настройки.", file=sys.stderr)
+        return None
+
+    return {
+        "msg": {
+            "submit_conformance": {
+                "divergence_micro": worst,
+                "logprobs_hash": canon.commit_hash(mine),
+            }
+        },
+        "divergence_micro": worst,
+        "per_text": per,
+        "texts": len(lens),
+        "ref_version": params.conformance_version if params else None,
+    }
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--base-url", required=True)
+    p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--dtype", default="bfloat16")
+    p.add_argument("--probe", default=PROBE_PATH)
+    p.add_argument("--rest", help="REST цепочки")
+    p.add_argument("--contract", help="адрес контракта")
+    a = p.parse_args()
+
+    params = None
+    if a.rest and a.contract:
+        try:
+            params = chain.load_params(a.rest, a.contract)
+        except chain.ChainUnavailable as e:
+            print(f"ОТКАЗ: параметры из цепочки не получены: {e}", file=sys.stderr)
+            return 1
+    else:
+        print("ВНИМАНИЕ: без параметров из цепочки предел неизвестен — "
+              "проба считается, но не оценивается", file=sys.stderr)
+
+    try:
+        r = run(a.base_url, a.model, params=params, dtype=a.dtype,
+                probe_path=a.probe)
+    except ProbeMismatch as e:
+        print(f"ОТКАЗ: {e}", file=sys.stderr)
+        return 1
+    if r is None:
+        return 1
+    print(f"проба пройдена: максимум {r['divergence_micro']} микродолей по "
+          f"{r['texts']} текстам, эталон версии {r['ref_version']}",
+          file=sys.stderr)
+    print(json.dumps(r["msg"], ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

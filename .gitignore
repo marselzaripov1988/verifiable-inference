@@ -1,0 +1,17 @@
+# Сборочные каталоги контракта. artifacts/ воспроизводим из Cargo.lock:
+# cosmwasm/optimizer собирает его побитово одинаково.
+protocol/contract/target/
+protocol/contract/artifacts/
+
+# Эталонный cw20_base для девнета — скачивается из релиза cw-plus,
+# в репозитории ему делать нечего.
+protocol/devnet/cw20_base.wasm
+
+# Учёт шлюза: остатки клиентов и прочитанная высота. Состояние рабочей
+# установки, а не код.
+gateway-ledger.json
+gateway/*.json
+live-ledger.json
+
+__pycache__/
+*.pyc
