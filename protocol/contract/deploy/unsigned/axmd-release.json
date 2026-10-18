@@ -1,0 +1,6 @@
+{
+  "binaries": {
+    "linux/amd64": "https://github.com/axiome-pro/axm-node/releases/download/v2.2.1/axmd-linux-amd64-2.2.1?checksum=sha256:c8ef347f91b1378225f102c1124efcdc81fe6bb83ae2223fd8175df2041c0d4d"
+  },
+  "src": "https://github.com/axiome-pro/axm-node/commit/6e481f6fc369786053ba6e451225ca780e3c387f"
+}
