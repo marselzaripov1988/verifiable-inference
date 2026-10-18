@@ -1,0 +1,15 @@
+{
+ "started": 1792223945.3740084,
+ "load_done": 850339,
+ "load_errors": 0,
+ "samples": 21585,
+ "sample_errors": 0,
+ "score_calls": 21585,
+ "score_retries": 0,
+ "score_failed": 0,
+ "canaries": 96,
+ "canary_identical": 44,
+ "canary_differed": 52,
+ "answer_tokens_under_32": 3278,
+ "hours": 23.98374385840363
+}
