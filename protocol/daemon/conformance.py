@@ -123,9 +123,8 @@ def run(base, model, params=None, dtype="bfloat16", probe_path=PROBE_PATH):
             return None
     # Узел, не повторяющий сам себя, пробу проходить не должен: его
     # собственные числа ничего не значат.
-    if not vllm.self_check(base, model):
-        print("ОТКАЗ: узел не повторяет сам себя — префикс-кеш не отключён "
-              "или включена выборка.", file=sys.stderr)
+    for p in vllm.self_check_problems(base, model):
+        print(f"ОТКАЗ: {p}", file=sys.stderr)
         return None
 
     probe = load_probe(probe_path, params)

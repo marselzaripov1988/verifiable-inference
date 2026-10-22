@@ -50,9 +50,8 @@ def run(base, model, job_id, prompt, answer, producer_vector, producer_hash,
             for b in bad:
                 print(f"ОТКАЗ: {b}", file=sys.stderr)
             return None
-    if not vllm.self_check(base, model):
-        print("ОТКАЗ: узел проверяющего не повторяет сам себя — "
-              "префикс-кеш не отключён или включена выборка.", file=sys.stderr)
+    for p in vllm.self_check_problems(base, model):
+        print(f"ОТКАЗ: узел проверяющего негоден: {p}", file=sys.stderr)
         return None
 
     logprobs = vllm.score(base, model, prompt + answer)

@@ -26,6 +26,10 @@ import vllm_client as vllm  # noqa: E402
 #: ниже проверяются её собственные повторы, а не подставная.
 REAL_SCORE = vllm.score
 
+#: Настоящая проверка узла. Один из тестов подменяет её заглушкой, и без
+#: возврата к настоящей заглушка протекала бы в следующие тесты.
+REAL_SELF_CHECK = vllm.self_check_problems
+
 fails = []
 
 
@@ -36,30 +40,52 @@ def ok(cond, what):
 
 
 class FakeVllm:
-    """Подставной сервер. deterministic=False имитирует неотключённый
-    префикс-кеш: второй прогон того же запроса отличается."""
+    """Подставной сервер.
 
-    def __init__(self, logprobs, deterministic=True, answer="  2, 3, 5, 7, 11"):
+    `deterministic=False` меняет ХВОСТ ответа от вызова к вызову. Это не
+    имитация выборки: честное жадное порождение под нагрузкой ведёт себя
+    ровно так же (все 52 разошедшиеся пары суточного прогона совпали на
+    44% ответа и разошлись дальше), и узел с таким поведением обязан
+    работать.
+
+    `sampling=True` меняет НАЧАЛО — вот это выборка, и её узел проходить
+    не должен.
+
+    `score_jitter` сдвигает оценку от вызова к вызову, в микродолях: так
+    выглядит узел, оценка которого не повторяется.
+    """
+
+    def __init__(self, logprobs, deterministic=True, answer="  2, 3, 5, 7, 11",
+                 sampling=False, score_jitter=0):
         self.logprobs = logprobs
         self.deterministic = deterministic
         self.answer = answer
+        self.sampling = sampling
+        self.score_jitter = score_jitter
         self.calls = 0
+        self.scores = 0
 
     def generate(self, base, model, prompt, max_tokens):
         self.calls += 1
+        if self.sampling:
+            return f"{self.calls} {self.answer}", ["t"] * 120
         suffix = "" if self.deterministic else f" {self.calls}"
         return self.answer + suffix, ["t"] * 120
 
     def score(self, base, model, text):
-        return self.logprobs
+        self.scores += 1
+        if not self.score_jitter:
+            return self.logprobs
+        shift = self.score_jitter * self.scores / 1e6
+        return [None if x is None else x + shift for x in self.logprobs]
 
 
 def patch(fake):
     vllm.generate = fake.generate
     vllm.score = fake.score
-    # self_check пользуется generate, поэтому остаётся настоящим.
-    vllm.self_check = lambda b, m, **kw: (
-        fake.generate(b, m, "x", 8)[0] == fake.generate(b, m, "x", 8)[0])
+    # self_check_problems НЕ подменяется: он пользуется и generate, и
+    # score, то есть на подставном сервере работает настоящий.
+    vllm.self_check_problems = REAL_SELF_CHECK
 
 
 def main():
@@ -79,12 +105,29 @@ def main():
     ok(msg["logprobs_hash"] == canon.commit_hash(producer_vector),
        "хэш считается по канону")
 
-    print("\n### узел, не повторяющий сам себя, не работает")
+    print("\n### узел, расходящийся в ХВОСТЕ порождения, работать ОБЯЗАН")
+    # Раньше здесь требовался отказ, и это было ошибкой: под нагрузкой
+    # два жадных порождения совпали 44 раза из 96, то есть честный узел
+    # отказывался работать именно тогда, когда зарабатывает. Все 52
+    # разошедшиеся пары суточного прогона совпали на 44% ответа.
     patch(FakeVllm(honest, deterministic=False))
+    ok(executor.run("http://x/v1", "m", 8, "p", 120, None) is not None,
+       "исполнитель не отказался из-за хвоста")
+
+    print("\n### узел с ВЫБОРКОЙ не работает")
+    patch(FakeVllm(honest, sampling=True))
     ok(executor.run("http://x/v1", "m", 8, "p", 120, None) is None,
-       "исполнитель отказался")
-    ok(checker.run("http://x/v1", "m", 8, "p", "a", producer_vector, None) is None,
-       "проверяющий отказался")
+       "исполнитель отказался при выборке")
+
+    print("\n### узел, у которого не повторяется ОЦЕНКА, не работает")
+    patch(FakeVllm(honest, score_jitter=30_000))
+    ok(executor.run("http://x/v1", "m", 8, "p", 120, None) is None,
+       "исполнитель отказался при неповторяющейся оценке")
+
+    print("\n### сдвиг оценки в пределах допуска работать не мешает")
+    patch(FakeVllm(honest, score_jitter=1_000))
+    ok(executor.run("http://x/v1", "m", 8, "p", 120, None) is not None,
+       "сдвиг 1 000 при пределе 24 000 — не повод отказывать")
 
     print("\n### честный проверяющий: расхождение около замеренного")
     # Его вектор отличается от вектора исполнителя на 0,0127 — это
@@ -362,7 +405,7 @@ def test_conformance():
     print("\n### узел, не повторяющий сам себя, пробу не проходит")
     vllm.score = lambda b, m, text: (
         [None] + [x / 1e6 for x in (honest[:3] if text == "текст один" else honest[3:])])
-    vllm.self_check = lambda b, m, **kw: False
+    vllm.self_check_problems = lambda b, m, **kw: ["узел негоден"]
     ok(conformance.run("http://x/v1", "m", params=P, probe_path=path) is None,
        "его собственные числа ничего не значат")
 

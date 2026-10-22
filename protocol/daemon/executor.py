@@ -60,10 +60,8 @@ def run(base, model, job_id, prompt, max_tokens, out_vector,
             for b in bad:
                 print(f"ОТКАЗ: {b}", file=sys.stderr)
             return None
-    if not vllm.self_check(base, model):
-        print("ОТКАЗ: узел не повторяет сам себя. Префикс-кеш не отключён "
-              "или включена выборка — порог для такого узла недействителен.",
-              file=sys.stderr)
+    for p in vllm.self_check_problems(base, model):
+        print(f"ОТКАЗ: {p}", file=sys.stderr)
         return None
 
     answer, tokens = vllm.generate(base, model, prompt, max_tokens)
