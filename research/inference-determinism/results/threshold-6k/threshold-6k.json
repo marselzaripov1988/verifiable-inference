@@ -1,0 +1,107 @@
+{
+ "note": "Перемер порога на 6 000 текстах при ВЫКЛЮЧЕННОМ выборе ядра по замеру, 22 октября 2026. Три честные карты на трёх машинах, два подлога (FP8, AWQ4) и неверный режим (eager). Флаги: --no-enable-flashinfer-autotune и inductor_compile_config {combo_kernels: false, benchmark_combo_kernel: false}.",
+ "cards": {
+  "a3090": "NVIDIA GeForce RTX 3090, 580.126.09",
+  "b3090": "NVIDIA GeForce RTX 3090, 590.48.01",
+  "honest4090": "NVIDIA GeForce RTX 4090, 590.48.01",
+  "fp8": "NVIDIA GeForce RTX 4090, 590.48.01",
+  "awq": "NVIDIA GeForce RTX 4090, 590.48.01",
+  "eager": "NVIDIA GeForce RTX 4090, 590.48.01"
+ },
+ "honest": {
+  "3090-A vs 3090-B": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 10694,
+   "median_micro": 10075,
+   "p99_micro": 16808,
+   "worst_micro": 18115,
+   "min_micro": 5635
+  },
+  "3090-A vs 4090": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 12953,
+   "median_micro": 12603,
+   "p99_micro": 20797,
+   "worst_micro": 24567,
+   "min_micro": 7343
+  },
+  "4090 vs 4090 (200 текстов)": {
+   "texts": 200,
+   "identical": 0,
+   "mean_micro": 11443,
+   "median_micro": 11045,
+   "p99_micro": 17742,
+   "worst_micro": 19671,
+   "min_micro": 6201
+  }
+ },
+ "fraud": {
+  "FP8 vs 4090": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 57125,
+   "median_micro": 56407,
+   "p99_micro": 113856,
+   "worst_micro": 118136,
+   "min_micro": 36966
+  },
+  "FP8 vs 3090-A": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 56780,
+   "median_micro": 55219,
+   "p99_micro": 106826,
+   "worst_micro": 116453,
+   "min_micro": 35545
+  },
+  "FP8 vs 3090-B": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 56860,
+   "median_micro": 55559,
+   "p99_micro": 108877,
+   "worst_micro": 117486,
+   "min_micro": 34866
+  },
+  "FP8 vs другая 4090 (200 текстов)": {
+   "texts": 200,
+   "identical": 0,
+   "mean_micro": 56958,
+   "median_micro": 55456,
+   "p99_micro": 83381,
+   "worst_micro": 101678,
+   "min_micro": 31206
+  },
+  "AWQ4 vs 4090": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 179460,
+   "median_micro": 166243,
+   "p99_micro": 449696,
+   "worst_micro": 452112,
+   "min_micro": 106549
+  }
+ },
+ "wrong_mode": {
+  "eager vs 4090": {
+   "texts": 6000,
+   "identical": 0,
+   "mean_micro": 18250,
+   "median_micro": 17271,
+   "p99_micro": 40713,
+   "worst_micro": 43149,
+   "min_micro": 8477
+  }
+ },
+ "threshold": {
+  "worst_honest_micro": 24567,
+  "min_fraud_micro": 31206,
+  "gap_micro": 6639,
+  "ratio": 1.27,
+  "log_midpoint_micro": 27688,
+  "current_threshold_micro": 36000,
+  "current_threshold_safe": false
+ }
+}
