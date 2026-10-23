@@ -189,20 +189,21 @@ def test_chain_params():
 
     print("### параметры читаются из цепочки")
     cfg = {
-        "threshold_micro": "36000", "checks_required": 4,
-        "min_answer_tokens": 32,
+        "checks_required": 2,
         "pinned_model": "Qwen/Qwen2.5-7B-Instruct",
         "pinned_runtime": "vllm-0.31.0", "pinned_dtype": "bfloat16",
+        "pinned_arch": "sm_89", "kernel_cache_hash": "3753554454f2c9b8",
         "settlement": {"cw20": "axm1uz…"}, "stake_denom": "uaxm",
-        "conformance_limit_micro": "25000",
+        "conformance_limit_micro": "0",
         "conformance_ref_hash": "0" * 64,
         "conformance_lens": [3, 3],
         "conformance_version": 1,
     }
     chain.query_smart = lambda rest, c, q, timeout=20: cfg
     p = chain.load_params("http://rest", "axm1c")
-    ok(p.threshold_micro == 36000, "порог из цепочки, строка приведена к числу")
-    ok(p.checks_required == 4, "число проверок из цепочки")
+    ok(p.checks_required == 2, "число проверок из цепочки")
+    ok(p.pinned_arch == "sm_89", "архитектура класса из цепочки")
+    ok(p.kernel_cache_hash == "3753554454f2c9b8", "хэш кеша ядер из цепочки")
     ok(p.stake_denom == "uaxm", "денom залога из цепочки")
     ok(chain.settlement_label(p.settlement) == "cw20:axm1uz…",
        "вид расчёта прочитан")
@@ -213,11 +214,12 @@ def test_chain_params():
         ok(False, "неизвестный вид расчёта должен отвергаться")
     except chain.ChainUnavailable:
         ok(True, "неизвестный вид расчёта — отказ, а не умолчание")
-    ok(p.conformance_limit_micro == 25000, "предел пробы из цепочки")
+    ok(p.conformance_limit_micro == 0,
+       "предел пробы из цепочки, и ноль — не отсутствие значения")
     ok(p.conformance_lens == (3, 3), "границы текстов пробы из цепочки")
 
     print("\n### неполные настройки — отказ, а не умолчание")
-    chain.query_smart = lambda rest, c, q, timeout=20: {"threshold_micro": "36000"}
+    chain.query_smart = lambda rest, c, q, timeout=20: {"checks_required": 2}
     try:
         chain.load_params("http://rest", "axm1c")
         ok(False, "неполные настройки должны отвергаться")
@@ -421,30 +423,46 @@ def test_conformance():
 
 
 def test_shipped_probe():
-    """Эталон, который лежит в репозитории, сходится сам с собой.
+    """Эталоны классов, лежащие в репозитории, сходятся сами с собой.
 
-    Он снят на живом 4090 (vLLM 0.31.0, bfloat16) и воспроизводим: два
-    прогона через перезапуск сервера дали 40 побитовых совпадений из 40.
-    Если файл поехал, узлы начнут сравниваться с мусором.
+    У каждого класса свой: между Ampere и Ada те же 334 текста не совпали
+    ни на одном, среднее расхождение 15 178. Эталоном одного класса
+    проверять другой бессмысленно, и спутать их нельзя.
     """
     import conformance
 
-    print("### эталон из репозитория")
-    p = conformance.load_probe(conformance.PROBE_PATH)
-    ok(len(p["texts"]) == len(p["ref"]) == len(p["lens"]),
-       "текстов, векторов и границ одинаково")
-    ok(len(p["texts"]) == 34, f"34 текста (вышло {len(p['texts'])})")
-    ok(all(len(v) >= 32 for v in p["ref"]),
-       "каждый текст не короче 32 чисел: ниже этой длины способ не работает")
-    ok(p["limit_micro"] == 60_000, "предел 60 000 — выведен из замеров")
-    obs = p["honest_observations"]
-    ok(max(v for k, v in obs.items() if "wrong" not in k) == 22_421,
-       "худшее честное наблюдение записано рядом с пределом")
-    ok(p["limit_micro"] > 22_421 * 2,
-       "запас к худшему честному не меньше двойного")
-    ok(obs["wrong_execution_mode_max"] > p["limit_micro"] * 5,
-       "неверный режим превышает предел с кратным запасом")
-    ok(sum(p["lens"]) == 3948, f"всего 3 948 чисел (вышло {sum(p['lens'])})")
+    for arch in ("sm_86", "sm_89"):
+        print(f"### эталон класса {arch}")
+        path = conformance.probe_path_for(arch)
+        p = conformance.load_probe(path)
+        ok(len(p["texts"]) == len(p["ref"]) == len(p["lens"]),
+           f"{arch}: текстов, векторов и границ одинаково")
+        ok(len(p["texts"]) == 34, f"{arch}: 34 текста (вышло {len(p['texts'])})")
+        ok(sum(p["lens"]) == 3948,
+           f"{arch}: всего 3 948 чисел (вышло {sum(p['lens'])})")
+        # Предел НОЛЬ, а не запас. Прежние 60 000 выбирались как запас к
+        # честному разбросу между картами — и неверный режим пропускали
+        # целиком: на этих же текстах eager даёт худшее 28 025.
+        ok(p["limit_micro"] == 0, f"{arch}: предел нулевой, а не запас")
+        ok(p["arch"].startswith(arch), f"{arch}: класс назван в эталоне")
+        ok("sha256" in p["kernel_cache"],
+           f"{arch}: назван кеш ядер, на котором снят эталон")
+
+    print("### эталоны классов различны")
+    a = conformance.load_probe(conformance.probe_path_for("sm_86"))
+    b = conformance.load_probe(conformance.probe_path_for("sm_89"))
+    ok(a["texts"] == b["texts"], "тексты у классов одни и те же")
+    ok(a["ref_hash"] != b["ref_hash"],
+       "а эталонные векторы разные: между архитектурами равенства не бывает")
+    ok(sum(1 for x, y in zip(a["ref"], b["ref"]) if x == y) == 0,
+       "ни один текст не совпал между Ampere и Ada")
+
+    print("### чужой класс не подсунуть")
+    try:
+        conformance.probe_path_for("sm_90")
+        ok(False, "неизвестная архитектура должна отвергаться")
+    except conformance.ProbeMismatch:
+        ok(True, "неизвестная архитектура — отказ, а не эталон чужого класса")
 
 
 def test_checker_needs_probe():

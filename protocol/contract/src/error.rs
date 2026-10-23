@@ -31,6 +31,12 @@ pub enum ContractError {
         dtype: String,
     },
 
+    #[error("не тот класс: архитектура {arch}, кеш ядер {kernel_cache_hash}")]
+    WrongClass {
+        arch: String,
+        kernel_cache_hash: String,
+    },
+
     #[error("задание не найдено")]
     JobUnknown,
 
@@ -39,9 +45,6 @@ pub enum ContractError {
 
     #[error("это не ваше задание")]
     NotYourJob,
-
-    #[error("ответ {got} токенов, нужно от {need}: ниже этой длины способ не работает")]
-    AnswerTooShort { got: u32, need: u32 },
 
     #[error("исполнитель не может проверять своё задание")]
     SelfCheck,

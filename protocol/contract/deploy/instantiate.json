@@ -1,13 +1,13 @@
 {
  "admin": "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67",
  "attestor": "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67",
- "threshold_micro": 36000,
- "checks_required": 4,
- "min_answer_tokens": 32,
+ "checks_required": 2,
  "pinned_model": "Qwen/Qwen2.5-7B-Instruct",
  "pinned_runtime": "vllm-0.31.0",
  "pinned_dtype": "bfloat16",
- "conformance_limit_micro": 60000,
+ "pinned_arch": "sm_89",
+ "kernel_cache_hash": "3753554454f2c9b850c6ec0912a58e39ee08028012f3de1e9649e62d67cc131a",
+ "conformance_limit_micro": 0,
  "conformance_ref_hash": "ed6a265b272006ac9279a7fee66c7e243ed6586fe87b0bd6526257c83a7da2b1",
  "conformance_lens": [
   105,

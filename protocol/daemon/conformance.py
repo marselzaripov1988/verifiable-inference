@@ -50,8 +50,28 @@ import vllm_client as vllm
 
 #: Эталон рядом с демоном. Это не источник истины: истина — обязательство
 #: в цепочке, и файл сверяется с ним перед работой.
-PROBE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                          "probe", "probe.json")
+#:
+#: Эталон У КАЖДОГО КЛАССА СВОЙ, и это необходимость: между Ampere и Ada
+#: те же 334 текста не совпали ни на одном, среднее расхождение 15 178.
+#: Проверять Ampere эталоном Ada бессмысленно. Какой брать — определяет
+#: архитектура узла; сверка с цепочкой всё равно отвергнет чужой.
+PROBE_BY_ARCH = {
+    "sm_86": "probe-v2-sm86.json",
+    "sm_89": "probe-v2-sm89.json",
+}
+PROBE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe")
+PROBE_PATH = os.path.join(PROBE_DIR, "probe-v2-sm89.json")
+
+
+def probe_path_for(arch):
+    """Эталон класса. Неизвестная архитектура — отказ, а не умолчание:
+    умолчание здесь означало бы сверку с эталоном чужого класса."""
+    name = PROBE_BY_ARCH.get(arch)
+    if name is None:
+        raise ProbeMismatch(
+            f"для архитектуры {arch!r} эталона нет; известны: "
+            f"{sorted(PROBE_BY_ARCH)}")
+    return os.path.join(PROBE_DIR, name)
 
 
 class ProbeMismatch(Exception):
@@ -145,14 +165,21 @@ def run(base, model, params=None, dtype="bfloat16", probe_path=PROBE_PATH):
         mine += v
 
     worst, per = max_per_text(reference, mine, lens)
+    # Предел НОЛЬ: внутри класса честный узел даёт расхождение ровно 0 —
+    # замерено на второй карте, другой машине и другом драйвере, 334
+    # текста из 334. Всё, что меняет арифметику, не совпадает ни на
+    # одном тексте. Прежний предел 60 000 неверный режим пропускал.
     limit = params.conformance_limit_micro if params else None
     if limit is not None and worst > limit:
         over = [i for i, d in enumerate(per) if d > limit]
-        print(f"ОТКАЗ: проба не пройдена. Максимум {worst} при пределе {limit}, "
-              f"превышен на текстах {over}.\n"
-              "  Это НЕ обязательно подлог: честный узел на карте, которой не "
-              "было в замерах, может разойтись сильнее. Но работать с таким "
-              "порогом нельзя — он для другой настройки.", file=sys.stderr)
+        print(f"ОТКАЗ: проба не пройдена. Максимум {worst} при пределе "
+              f"{limit}, разошлось на текстах {over}.", file=sys.stderr)
+        print("  Это НЕ обвинение: несовпадение связки означает, что узел "
+              "НЕСРАВНИМ с остальными, а не что он жулик. Вердикт выносится "
+              "только тем, кто пробу прошёл.", file=sys.stderr)
+        print("  Чаще всего причина — не тот кеш ядер: поставьте раздаваемый "
+              "архив своего класса ДО первого запуска сервера и сверьте его "
+              "sha256.", file=sys.stderr)
         return None
 
     return {

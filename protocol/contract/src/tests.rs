@@ -31,6 +31,10 @@ const CLIENT: &str = "client1";
 const MODEL: &str = "Qwen/Qwen2.5-7B-Instruct";
 const RUNTIME: &str = "vllm-0.31.0";
 const DTYPE: &str = "bfloat16";
+/// Остальная часть класса. Без общего кеша ядер честные узлы расходятся
+/// в последнем бите, и равенство хэшей — то есть вердикт — невозможно.
+const ARCH: &str = "sm_89";
+const CACHE: &str = "3753554454f2c9b850c6ec0912a58e39ee08028012f3de1e9649e62d67cc131a";
 // Имена денomов нигде в логике не участвуют — только в настройках.
 const STAKE: &str = "uaxm";
 const CW20: &str = "cw20token";
@@ -43,15 +47,29 @@ const FEE: u128 = 97_000;
 const TOTAL: u128 = PRICE + FEE;
 const FEE_BPS: u16 = 970; // 9,7% — замеренные накладные при четырёх проверках
 
-const THRESHOLD: u64 = 36_000;
-const FRAUD_MIN: u64 = 37_780;
+/// Сколько проверок требуется. Двух хватает: усреднять нечего, внутри
+/// класса честные векторы тождественны, а лгущего проверяющего разберёт
+/// спор с пересчётом на цепочке.
+const CHECKS: u32 = 2;
+
+/// Обязательство исполнителя в заданиях-болванках. Проверка, сдавшая
+/// ЭТОТ хэш, совпала с исполнителем.
+const COMMIT: &str = "lh";
+
+/// Расхождение как СВИДЕТЕЛЬСТВО, а не как вердикт. Шесть миллионных —
+/// настоящее наблюдение: столько даёт разный блок свёртки на Ada, и
+/// этого довольно, чтобы побитовое равенство сломалось. Нужно затем,
+/// чтобы проверить, что вердикт не зависит от величины.
+const TINY: u64 = 6;
+const HUGE: u64 = 143_310;
 const HONEST_MEAN: u64 = 12_700;
-const HONEST_WORST: u64 = 44_660;
 
 // --- проба на эталонном векторе -----------------------------------------
-// Предел 25_000 из замера: честный узел на ЧУЖОЙ карте даёт максимум
-// 20_137, а тот же узел в неверном режиме исполнения — 413_488.
-const CONF_LIMIT: u64 = 25_000;
+// Предел НОЛЬ: внутри класса честный узел даёт расхождение ровно 0 —
+// замерено на второй карте, другой машине и другом драйвере, 334 текста
+// из 334. Прежние 25_000 были запасом к разбросу между картами, которого
+// внутри класса не существует.
+const CONF_LIMIT: u64 = 0;
 /// Две «пробы» по три числа: больше для проверки правила не нужно, а
 /// границы текстов обязаны быть именно двумя, иначе максимум по текстам
 /// не отличить от среднего по склейке.
@@ -59,12 +77,16 @@ const PROBE_LENS: [u32; 2] = [3, 3];
 fn probe_ref() -> Vec<MicroLog> {
     vec![-500_000, -500_000, -500_000, -400_000, -400_000, -400_000]
 }
-/// Узел, сошедшийся с эталоном: ровно честное среднее на каждом элементе.
+/// Узел, сошедшийся с эталоном. При нулевом пределе это значит ТОЧНО
+/// эталон: внутри класса честный узел даёт расхождение ровно 0.
 fn probe_honest() -> Vec<MicroLog> {
     probe_ref()
-        .iter()
-        .map(|x| x - HONEST_MEAN as i64)
-        .collect()
+}
+
+/// Узел не того класса: расходится с эталоном, хоть и немного. Шести
+/// миллионных достаточно — при нулевом пределе величина не важна.
+fn probe_foreign() -> Vec<MicroLog> {
+    probe_ref().iter().map(|x| x - TINY as i64).collect()
 }
 
 fn setup(deps: DepsMut) {
@@ -75,12 +97,12 @@ fn setup(deps: DepsMut) {
         InstantiateMsg {
             admin: ADMIN.into(),
             attestor: ATTESTOR.into(),
-            threshold_micro: THRESHOLD,
-            checks_required: 4,
-            min_answer_tokens: 32,
+            checks_required: CHECKS,
             pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(),
             pinned_dtype: DTYPE.into(),
+            pinned_arch: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
@@ -104,7 +126,8 @@ fn register_and_attest(deps: DepsMut, who: &str) {
             model: MODEL.into(),
             runtime: RUNTIME.into(),
             dtype: DTYPE.into(),
-            card_class: "rtx4090".into(),
+            card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         },
     )
     .unwrap();
@@ -125,7 +148,9 @@ fn register_and_attest(deps: DepsMut, who: &str) {
         },
     )
     .unwrap();
-    pass_probe(d.branch(), who, HONEST_MEAN);
+    // Внутри класса честный узел заявляет РОВНО ноль: его вектор
+    // тождествен эталонному.
+    pass_probe(d.branch(), who, 0);
 }
 
 /// Сдать пробу. Число заявляется исполнителем, обязательство — его
@@ -156,11 +181,14 @@ fn register_and_probe(deps: DepsMut, who: &str) {
             model: MODEL.into(),
             runtime: RUNTIME.into(),
             dtype: DTYPE.into(),
-            card_class: "rtx4090".into(),
+            card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         },
     )
     .unwrap();
-    pass_probe(d.branch(), who, HONEST_MEAN);
+    // Внутри класса честный узел заявляет РОВНО ноль: его вектор
+    // тождествен эталонному.
+    pass_probe(d.branch(), who, 0);
 }
 
 /// Заказчик ставит задание. Расчётная единица — CW20, поэтому вызов
@@ -209,24 +237,49 @@ fn job_until_answered(deps: DepsMut) -> u64 {
     1
 }
 
-fn submit_checks(deps: DepsMut, job_id: u64, values: &[u64]) {
+/// Сдать проверки. `matched[i]` — совпал ли хэш i-го проверяющего с
+/// обязательством исполнителя; `evidence[i]` — расхождение, которое он
+/// заявляет.
+///
+/// Вердикт решает ТОЛЬКО совпадение хэша. Расхождение сдаётся как
+/// свидетельство: по нему видно, насколько разошлись, и по нему
+/// разбирается спор. Поэтому в тестах оно нарочно берётся то крошечным,
+/// то огромным — вердикт от него не меняется.
+fn submit_checks_with(deps: DepsMut, job_id: u64, matched: &[bool], evidence: &[u64]) {
     let mut d = deps;
-    for (i, v) in values.iter().enumerate() {
+    for (i, m) in matched.iter().enumerate() {
         let who = format!("checker{}", i);
         // Проверяющий тоже обязан пройти пробу: сравниваются его числа.
         register_and_probe(d.branch(), &who);
         execute(
             d.branch(),
             mock_env(),
-            mock_info(&format!("checker{}", i), &[]),
+            mock_info(&who, &[]),
             ExecuteMsg::SubmitCheck {
                 job_id,
-                divergence_micro: *v,
-                logprobs_hash: format!("hash{}", i),
+                divergence_micro: evidence[i],
+                logprobs_hash: if *m {
+                    COMMIT.into()
+                } else {
+                    format!("другой{}", i)
+                },
             },
         )
         .unwrap();
     }
+}
+
+/// Все проверки совпали с исполнителем. Расхождение при этом нулевое —
+/// внутри класса честные векторы тождественны.
+fn submit_checks_matching(deps: DepsMut, job_id: u64, n: usize) {
+    submit_checks_with(deps, job_id, &vec![true; n], &vec![0; n]);
+}
+
+/// Ни одна не совпала, и расхождение при этом КРОШЕЧНОЕ — шесть
+/// миллионных. Настоящее наблюдение: столько даёт разный блок свёртки на
+/// Ada, и этого довольно, чтобы равенство сломалось.
+fn submit_checks_mismatching(deps: DepsMut, job_id: u64, n: usize) {
+    submit_checks_with(deps, job_id, &vec![false; n], &vec![TINY; n]);
 }
 
 #[test]
@@ -243,7 +296,8 @@ fn chuzhaya_svyazka_otklonyaetsya() {
             model: MODEL.into(),
             runtime: "vllm-0.32.0".into(),
             dtype: DTYPE.into(),
-            card_class: "rtx4090".into(),
+            card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         },
     )
     .unwrap_err();
@@ -262,7 +316,8 @@ fn bez_dopuska_zadanie_ne_vzyat() {
             model: MODEL.into(),
             runtime: RUNTIME.into(),
             dtype: DTYPE.into(),
-            card_class: "rtx3090".into(),
+            card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         },
     )
     .unwrap();
@@ -291,7 +346,7 @@ fn bez_dopuska_zadanie_ne_vzyat() {
 }
 
 #[test]
-fn korotkiy_otvet_otklonyaetsya() {
+fn korotkiy_otvet_bolshe_ne_otklonyaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
@@ -303,23 +358,29 @@ fn korotkiy_otvet_otklonyaetsya() {
         ExecuteMsg::ClaimJob { job_id: 1 },
     )
     .unwrap();
-    // 31 токен: ниже границы 32, где запас падает до 1,6x
-    let err = execute(
+    // Прежде 31 токен отклонялся: на коротких ответах запас порога падал
+    // до 1,6x. Порога больше нет, а равенство хэшей от длины не зависит —
+    // и замерено прямо, что отсечка по длине ответа пересечения полос не
+    // убирала ни при 32 токенах, ни при 128. Значит гейт был лишним, и
+    // короткий ответ принимается.
+    execute(
         deps.as_mut(),
         mock_env(),
         mock_info(EXEC, &[]),
         ExecuteMsg::SubmitAnswer {
             job_id: 1,
             answer_hash: "ah".into(),
-            logprobs_hash: "lh".into(),
+            logprobs_hash: COMMIT.into(),
             answer_tokens: 31,
         },
     )
-    .unwrap_err();
-    assert!(matches!(
-        err,
-        ContractError::AnswerTooShort { got: 31, need: 32 }
-    ));
+    .unwrap();
+    let job: Job = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Job { job_id: 1 }).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(job.state, JobState::Answered);
+    assert_eq!(job.answer_tokens, Some(31));
 }
 
 #[test]
@@ -348,7 +409,7 @@ fn odin_proveryayushchiy_ne_sdast_dvazhdy() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN]);
+    submit_checks_matching(deps.as_mut(), id, 1);
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -369,7 +430,7 @@ fn nepolnoe_okno_ne_svoditsya() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN, FRAUD_MIN, FRAUD_MIN]);
+    submit_checks_mismatching(deps.as_mut(), id, 1);
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -379,7 +440,7 @@ fn nepolnoe_okno_ne_svoditsya() {
     .unwrap_err();
     assert!(matches!(
         err,
-        ContractError::NotEnoughChecks { got: 3, need: 4 }
+        ContractError::NotEnoughChecks { got: 1, need: 2 }
     ));
 }
 
@@ -389,12 +450,11 @@ fn podlog_na_samom_nezametnom_lovitsya() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    // Худший случай: минимум измеренного подлога, 1 780 микродолей над порогом
-    submit_checks(
-        deps.as_mut(),
-        id,
-        &[FRAUD_MIN, FRAUD_MIN + 920, FRAUD_MIN + 1960, FRAUD_MIN + 6430],
-    );
+    // Величина расхождения вердикта НЕ решает, и это главная перемена.
+    // Прежде здесь брался минимум измеренного подлога — 37 780, едва над
+    // порогом 36 000. Теперь берётся шесть миллионных: столько даёт
+    // разный блок свёртки на Ada, и этого довольно, чтобы хэш разошёлся.
+    submit_checks_with(deps.as_mut(), id, &[false, false], &[TINY, TINY]);
     let res = execute(
         deps.as_mut(),
         mock_env(),
@@ -435,13 +495,13 @@ fn tri_iz_chetyreh_eto_ne_vina() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    // Три превышения и одно нет — правило «все превысили» не срабатывает.
-    // Это и есть защита от сговора трёх проверяющих.
-    submit_checks(
-        deps.as_mut(),
-        id,
-        &[FRAUD_MIN, FRAUD_MIN, FRAUD_MIN, HONEST_MEAN],
-    );
+    // Одна проверка не совпала, другая совпала — правило «не совпало у
+    // всех» не срабатывает. Это и есть защита от лгущего проверяющего:
+    // чтобы обвинить честного, сговориться должны ВСЕ.
+    //
+    // Расхождение у несовпавшей взято огромным — 143 310, настоящий
+    // подлог FP8. Вердикт от этого не меняется: решает совпадение хэша.
+    submit_checks_with(deps.as_mut(), id, &[false, true], &[HUGE, 0]);
     execute(
         deps.as_mut(),
         mock_env(),
@@ -475,14 +535,14 @@ fn hudshee_chestnoe_nablyudenie_ne_obvinyaet() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    // 44 660 — худшее честное наблюдение из 1520, оно ВЫШЕ порога.
-    // Но чтобы обвинить, таких нужно четыре подряд, а их доля 0,26%:
-    // здесь три честных типичных и одно худшее.
-    submit_checks(
-        deps.as_mut(),
-        id,
-        &[HONEST_WORST, HONEST_MEAN, HONEST_MEAN, HONEST_MEAN],
-    );
+    // Проверяющие заявляют БОЛЬШИЕ расхождения — 12 700, честное среднее
+    // из прежних замеров, и это заведомо выше отменённого порога 36 000
+    // не дотягивает, а вот 143 310 дотягивает с лихвой. И всё равно
+    // обвинения нет: хэш у обоих совпал с исполнителем.
+    //
+    // Прежде этот тест держался на том, что порог превышен не всеми.
+    // Теперь — на том, что порог не при чём вовсе.
+    submit_checks_with(deps.as_mut(), id, &[true, true], &[HONEST_MEAN, HUGE]);
     execute(
         deps.as_mut(),
         mock_env(),
@@ -498,14 +558,17 @@ fn hudshee_chestnoe_nablyudenie_ne_obvinyaet() {
 }
 
 #[test]
-fn na_poroge_rovno_eto_prevyshenie() {
+fn nulevoe_rashozhdenie_pri_chuzhom_heshe_tozhe_vina() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    // Граница включающая: >= порога. Фиксируем это тестом, чтобы никто
-    // не поменял на > и не сдвинул правило молча.
-    submit_checks(deps.as_mut(), id, &[THRESHOLD; 4]);
+    // Крайний случай с другой стороны: проверяющие заявляют расхождение
+    // НОЛЬ, а хэш сдают чужой. Это противоречие — ноль означает
+    // тождественные векторы, а тождественные векторы дают тот же хэш, —
+    // и вердикт идёт по хэшу. Разберёт противоречие спор: пересчёт на
+    // цепочке покажет, что заявленный ноль не сходится с векторами.
+    submit_checks_with(deps.as_mut(), id, &[false, false], &[0, 0]);
     execute(
         deps.as_mut(),
         mock_env(),
@@ -526,7 +589,7 @@ fn pyataya_proverka_ne_prinimaetsya() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     // Лишние проверки меняли бы долю ложных обвинений, поэтому окно
     // закрывается ровно на checks_required.
     register_and_probe(deps.as_mut(), "checker9");
@@ -550,7 +613,7 @@ fn zabanennogo_nelzya_vernut() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     execute(
         deps.as_mut(),
         mock_env(),
@@ -595,12 +658,12 @@ fn prava_razdeleny() {
         mock_info(ATTESTOR, &[]),
         ExecuteMsg::UpdateConfig {
             admin: None, attestor: None,
-            threshold_micro: Some(1),
-            checks_required: None,
-            min_answer_tokens: None,
+            checks_required: Some(1),
             pinned_model: None,
             pinned_runtime: None,
             pinned_dtype: None,
+            pinned_arch: None,
+            kernel_cache_hash: None,
             conformance_limit_micro: None,
             conformance_ref: None,
             settlement: None,
@@ -621,7 +684,8 @@ fn prava_razdeleny() {
             model: MODEL.into(),
             runtime: RUNTIME.into(),
             dtype: DTYPE.into(),
-            card_class: "a100".into(),
+            card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         },
     )
     .unwrap();
@@ -648,12 +712,12 @@ fn nol_proverok_zapreshchen() {
         InstantiateMsg {
             admin: ADMIN.into(),
             attestor: ATTESTOR.into(),
-            threshold_micro: THRESHOLD,
             checks_required: 0,
-            min_answer_tokens: 32,
             pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(),
             pinned_dtype: DTYPE.into(),
+            pinned_arch: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
@@ -669,22 +733,20 @@ fn nol_proverok_zapreshchen() {
 }
 
 #[test]
-fn zapros_proverok_schitaet_prevysheniya() {
+fn zapros_proverok_schitaet_nesovpadeniya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(
-        deps.as_mut(),
-        id,
-        &[FRAUD_MIN, HONEST_MEAN, FRAUD_MIN, HONEST_MEAN],
-    );
+    // Одна совпала, одна нет — запрос обязан считать НЕСОВПАДЕНИЯ, а не
+    // превышения порога: порога больше нет.
+    submit_checks_with(deps.as_mut(), id, &[false, true], &[HUGE, 0]);
     let r: ChecksResponse = from_json(
         query(deps.as_ref(), mock_env(), QueryMsg::Checks { job_id: id }).unwrap(),
     )
     .unwrap();
-    assert_eq!(r.checks.len(), 4);
-    assert_eq!(r.exceeded, 2);
+    assert_eq!(r.checks.len(), 2);
+    assert_eq!(r.mismatched, 1);
     let _ = Addr::unchecked(EXEC);
 }
 
@@ -772,7 +834,7 @@ fn vrushchiy_proveryayushchiy_lovitsya() {
     execute(deps.as_mut(), mock_env(), mock_info("checker0", &[]),
         ExecuteMsg::SubmitCheck {
             job_id: id,
-            divergence_micro: FRAUD_MIN,
+            divergence_micro: HUGE,
             logprobs_hash: commit_hash(&chk),
         }).unwrap();
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -824,7 +886,7 @@ fn posle_verdikta_sporit_pozdno() {
     let prod: Vec<i64> = (0..100).map(|i| -500_000 - i * 1000).collect();
     let chk: Vec<i64> = prod.iter().map(|x| x - 12_700).collect();
     let id = job_with_commit(deps.as_mut(), &prod);
-    for i in 0..4 {
+    for i in 0..CHECKS {
         register_and_probe(deps.as_mut(), &format!("checker{}", i));
         execute(deps.as_mut(), mock_env(), mock_info(&format!("checker{}", i), &[]),
             ExecuteMsg::SubmitCheck {
@@ -856,7 +918,8 @@ fn bez_zaloga_zadanie_ne_vzyat() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "rtx4090".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
     execute(deps.as_mut(), mock_env(), mock_info(ATTESTOR, &[]),
         ExecuteMsg::Attest { executor: EXEC.into(), eligible: true }).unwrap();
@@ -900,7 +963,7 @@ fn chestnomu_platyat_a_proveryayushchim_dolyu() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     // 970 bps от 1 000 000 это 97 000, на четверых по 24 250 ровно.
@@ -910,7 +973,7 @@ fn chestnomu_platyat_a_proveryayushchim_dolyu() {
     assert!(res.attributes.iter().any(|a| a.key == "settled"
         && a.value == PRICE.to_string()));
     // Четыре сообщения проверяющим плюс одно исполнителю.
-    assert_eq!(res.messages.len(), 5);
+    assert_eq!(res.messages.len(), 3);
 }
 
 #[test]
@@ -919,12 +982,12 @@ fn vinovnomu_ne_platyat_zalog_izymayut() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "guilty" && a.value == "true"));
     // Четыре проверяющим, возврат заказчику, изъятие залога.
-    assert_eq!(res.messages.len(), 6);
+    assert_eq!(res.messages.len(), 4);
     let e: Executor = from_json(query(deps.as_ref(), mock_env(),
         QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
     assert_eq!(e.stake, Uint128::zero(), "залог изъят");
@@ -936,12 +999,16 @@ fn proveryayushchim_platyat_nezavisimo_ot_verdikta() {
     // Плати им из исхода — появится интерес к исходу. Доля обязана быть
     // одинаковой при обоих вердиктах.
     let mut fees = vec![];
-    for values in [[HONEST_MEAN; 4], [FRAUD_MIN; 4]] {
+    for matched in [true, false] {
         let mut deps = mock_dependencies();
         setup(deps.as_mut());
         register_and_attest(deps.as_mut(), EXEC);
         let id = job_until_answered(deps.as_mut());
-        submit_checks(deps.as_mut(), id, &values);
+        if matched {
+            submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
+        } else {
+            submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
+        }
         let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
             ExecuteMsg::Finalize { job_id: id }).unwrap();
         fees.push(res.attributes.iter()
@@ -956,8 +1023,9 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: None,
@@ -965,7 +1033,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
         }).unwrap();
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     let dump = format!("{:?}", res.messages);
@@ -981,7 +1049,7 @@ fn dvazhdy_ne_vyplachivaetsya() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -995,8 +1063,9 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
     setup(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: Some(10_001), forfeit: None,
@@ -1010,7 +1079,7 @@ fn zabanennyy_zalog_ne_zaberyot() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     // Забанить и дать уйти с залогом — значит не наказать вовсе.
@@ -1036,7 +1105,8 @@ fn bez_proby_zadanie_ne_vzyat() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "rtx4090".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
         ExecuteMsg::DepositStake {}).unwrap();
@@ -1055,7 +1125,8 @@ fn proba_vyshe_predela_ne_prinimaetsya() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "rtx4090".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::SubmitConformance {
@@ -1067,25 +1138,65 @@ fn proba_vyshe_predela_ne_prinimaetsya() {
 }
 
 #[test]
-fn chuzhaya_karta_probu_prohodit() {
-    // Требовать одинаковых карт было бы неверно: замерено, что честный
-    // узел на A100 и на 3090 расходится с 4090 максимум на 20 137 —
-    // ниже предела 25 000. Проба отсеивает режим исполнения, а не карту.
+fn chuzhaya_arhitektura_v_klass_ne_vhodit() {
+    // Прежде здесь утверждалось обратное: «требовать одинаковых карт
+    // было бы неверно, честный узел на A100 расходится с 4090 максимум
+    // на 20 137, ниже предела». Это было верно для порога и неверно
+    // теперь: вердикт выносится РАВЕНСТВОМ, а между архитектурами
+    // равенства не бывает вовсе — те же 334 текста на Ampere и Ada не
+    // совпали ни на одном, среднее расхождение 15 178.
+    //
+    // Поэтому чужая архитектура отсеивается на регистрации, и это не
+    // обвинение: такой узел НЕСРАВНИМ, а не жульничает.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::RegisterExecutor {
+            model: MODEL.into(), runtime: RUNTIME.into(),
+            dtype: DTYPE.into(), card_class: "sm_80".into(),
+            kernel_cache_hash: CACHE.into(),
+        }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongClass { .. }), "{err:?}");
+}
+
+#[test]
+fn chuzhoy_kesh_yader_v_klass_ne_vhodit() {
+    // Кеш ядер — такая же часть класса, как архитектура. Из четырёх
+    // RTX 3090 три совпали побитово, четвёртая не совпала ни с одной, и
+    // различался у неё выбор блока свёртки: R0_BLOCK 2048 против 4096.
+    // Кеш совпавшей, перенесённый на неё, дал 300 совпадений из 300.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::RegisterExecutor {
+            model: MODEL.into(), runtime: RUNTIME.into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: "своя сборка".into(),
+        }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongClass { .. }), "{err:?}");
+}
+
+#[test]
+fn uzel_svoego_klassa_probu_prohodit_s_nulyom() {
+    // Внутри класса честный узел даёт расхождение РОВНО 0: замерено на
+    // второй карте, другой машине и другом драйвере — 34 из 34 текстов
+    // пробы и 300 из 300 текстов корпуса.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "a100".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::SubmitConformance {
-            divergence_micro: 20_137,
+            divergence_micro: 0,
             logprobs_hash: commit_hash(&probe_honest()),
         }).unwrap();
     let e: Executor = from_json(query(deps.as_ref(), mock_env(),
         QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
-    assert_eq!(e.conformance.unwrap().divergence_micro, 20_137);
+    assert_eq!(e.conformance.unwrap().divergence_micro, 0);
 }
 
 #[test]
@@ -1097,8 +1208,8 @@ fn smena_svyazki_obnulyaet_probu() {
     // Порог измерен для связки; сменили связку — все пробы о прежней.
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None, pinned_model: None,
             pinned_runtime: Some("vllm-0.32.0".into()), pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None, min_stake: None,
@@ -1117,11 +1228,12 @@ fn smena_etalona_obnulyaet_probu() {
     submit_job(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: Some(ConformanceRef {
-                ref_hash: commit_hash(&probe_honest()),
+                ref_hash: commit_hash(&probe_foreign()),
                 lens: PROBE_LENS.to_vec(),
             }),
             settlement: None, stake_denom: None, min_stake: None,
@@ -1142,8 +1254,8 @@ fn zapis_toy_zhe_svyazki_probu_ne_obnulyaet() {
     submit_job(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: Some(MODEL.into()),
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None, pinned_model: Some(MODEL.into()),
             pinned_runtime: Some(RUNTIME.into()), pinned_dtype: Some(DTYPE.into()),
             conformance_limit_micro: Some(CONF_LIMIT),
             conformance_ref: Some(ConformanceRef {
@@ -1164,14 +1276,19 @@ fn lozh_v_probe_oproverzhima() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "rtx4090".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
     // Расхождение своих векторов с эталоном он считает сам, поэтому
     // назвать может любое. Обязательство векторами делает это проверяемым.
+    //
+    // При нулевом пределе принимается только заявление НОЛЬ — значит и
+    // лгать приходится нулём, обязуясь векторами, которые расходятся на
+    // 100 000. Опровержение это и вскрывает.
     let mine: Vec<MicroLog> = probe_ref().iter().map(|x| x - 100_000).collect();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::SubmitConformance {
-            divergence_micro: HONEST_MEAN,
+            divergence_micro: 0,
             logprobs_hash: commit_hash(&mine),
         }).unwrap();
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1190,43 +1307,31 @@ fn lozh_v_probe_oproverzhima() {
 }
 
 #[test]
-fn proba_po_maksimumu_a_ne_po_sredney_skleyke() {
-    // САМОЕ ВАЖНОЕ свойство правила. Неверный режим исполнения портит
-    // РЕДКИЕ тексты: у eager 29 из 40 векторов совпали с собой побитово,
-    // а на остальных расхождение доходило до 413 488. Среднее по склейке
-    // такую порчу размывает — замерено, что зазор падает с 20x до 1,5x, —
-    // и жулик проходил бы пробу.
+fn lyuboe_nenulevoe_rashozhdenie_probu_valit() {
+    // Прежде этот тест держался на выборе статистики: неверный режим
+    // портит РЕДКИЕ тексты (у eager 29 из 40 совпадали побитово), и
+    // среднее по склейке такую порчу размывало — зазор падал с 20x до
+    // 1,5x. Поэтому бралось максимальное по текстам.
     //
-    // Здесь первый текст сходится с эталоном точно, второй расходится на
-    // 48 000. Среднее по склейке 24 000 — НИЖЕ предела 25 000. Максимум
-    // по текстам 48 000 — выше.
+    // При нулевом пределе выбор статистики не решает ничего: честный
+    // узел класса даёт 0 на КАЖДОМ тексте, а отклонившийся — не 0, и
+    // любая статистика это видит. Проверяется теперь именно это: шести
+    // миллионных на одном тексте довольно, чтобы пробу не сдать.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "rtx4090".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
-    let mut mine = probe_ref();
-    for x in mine.iter_mut().skip(PROBE_LENS[0] as usize) {
-        *x -= 48_000;
-    }
-    assert_eq!(divergence_micro(&probe_ref(), &mine).unwrap(), 24_000,
-        "среднее по склейке ниже предела — именно это и опасно");
-    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::SubmitConformance {
-            divergence_micro: 24_000,
-            logprobs_hash: commit_hash(&mine),
-        }).unwrap();
-    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
-        ExecuteMsg::DisputeConformance {
-            executor: EXEC.into(),
-            reference_logprobs: probe_ref(),
-            executor_logprobs: mine,
-        }).unwrap();
-    assert!(res.attributes.iter().any(|a| a.key == "actual_micro"
-        && a.value == "48000"), "считается максимум по текстам");
-    assert!(res.attributes.iter().any(|a| a.key == "lied" && a.value == "true"));
+            divergence_micro: TINY,
+            logprobs_hash: commit_hash(&probe_foreign()),
+        }).unwrap_err();
+    assert!(matches!(err, ContractError::ConformanceFailed { got: TINY, limit: 0 }),
+        "{err:?}");
 }
 
 #[test]
@@ -1244,7 +1349,8 @@ fn chestnuyu_probu_oproverzhenie_podtverzhdaet() {
     let e: Executor = from_json(query(deps.as_ref(), mock_env(),
         QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
     assert_eq!(e.status, ExecutorStatus::Active, "честного опровержение не трогает");
-    assert_eq!(e.conformance.unwrap().divergence_micro, HONEST_MEAN);
+    assert_eq!(e.conformance.unwrap().divergence_micro, 0,
+        "честный узел класса заявляет ноль, и опровержение это подтверждает");
 }
 
 #[test]
@@ -1290,12 +1396,13 @@ fn ne_ta_dlina_v_probe_otvergaetsya() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
-            dtype: DTYPE.into(), card_class: "rtx4090".into(),
+            dtype: DTYPE.into(), card_class: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
         }).unwrap();
     let short: Vec<MicroLog> = probe_honest()[..5].to_vec();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::SubmitConformance {
-            divergence_micro: HONEST_MEAN,
+            divergence_micro: 0,
             logprobs_hash: commit_hash(&short),
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1314,8 +1421,9 @@ fn pustoy_etalon_ne_prinimaetsya() {
     let err = instantiate(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         InstantiateMsg {
             admin: ADMIN.into(), attestor: ATTESTOR.into(),
-            threshold_micro: THRESHOLD, checks_required: 4,
-            min_answer_tokens: 32, pinned_model: MODEL.into(),
+            checks_required: CHECKS,
+            pinned_arch: ARCH.into(), kernel_cache_hash: CACHE.into(),
+    pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(), pinned_dtype: DTYPE.into(),
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
@@ -1334,7 +1442,7 @@ fn zabanennyy_probu_ne_sdast() {
     setup(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1356,7 +1464,7 @@ fn proveryayushchiy_bez_proby_ne_prinimaetsya() {
     let id = job_until_answered(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info("nobody", &[]),
         ExecuteMsg::SubmitCheck {
-            job_id: id, divergence_micro: FRAUD_MIN, logprobs_hash: "h".into(),
+            job_id: id, divergence_micro: HUGE, logprobs_hash: "h".into(),
         }).unwrap_err();
     assert!(matches!(err, ContractError::ExecutorUnknown));
 }
@@ -1371,11 +1479,12 @@ fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
     // Сменили эталон — проба проверяющего больше не о действующей настройке.
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: Some(ConformanceRef {
-                ref_hash: commit_hash(&probe_honest()),
+                ref_hash: commit_hash(&probe_foreign()),
                 lens: PROBE_LENS.to_vec(),
             }),
             settlement: None, stake_denom: None, min_stake: None,
@@ -1408,12 +1517,12 @@ fn setup_native(deps: DepsMut) {
         InstantiateMsg {
             admin: ADMIN.into(),
             attestor: ATTESTOR.into(),
-            threshold_micro: THRESHOLD,
-            checks_required: 4,
-            min_answer_tokens: 32,
+            checks_required: CHECKS,
             pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(),
             pinned_dtype: DTYPE.into(),
+            pinned_arch: ARCH.into(),
+            kernel_cache_hash: CACHE.into(),
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
@@ -1539,7 +1648,7 @@ fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
     setup_native(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     // Те же 970 bps: на четверых по 24 250, исполнителю ЦЕНА ЦЕЛИКОМ.
@@ -1547,7 +1656,7 @@ fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
         && a.value == FEE.to_string()));
     assert!(res.attributes.iter().any(|a| a.key == "settled"
         && a.value == PRICE.to_string()));
-    assert_eq!(res.messages.len(), 5);
+    assert_eq!(res.messages.len(), 3);
     // Проверка по ТИПУ сообщения, а не по отладочной строке: строка —
     // представление, и меняется она не вместе с поведением.
     let mut sent = 0u128;
@@ -1572,7 +1681,7 @@ fn rodnoy_vozvrat_zakazchiku_pri_podloge() {
     setup_native(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "guilty" && a.value == "true"));
@@ -1592,8 +1701,9 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None,
             settlement: Some(Settlement::Native(NATIVE.into())),
@@ -1631,12 +1741,15 @@ fn list_razvyortyvaniya_razbiraetsya_kontraktom() {
     // проверяет уже контракт при instantiate. Здесь проверяется ФОРМА.
     let raw = include_str!("../deploy/instantiate.json");
     let msg: InstantiateMsg = serde_json::from_str(raw).expect("лист не разобран");
-    assert_eq!(msg.threshold_micro, THRESHOLD, "порог тот, что измерен");
-    assert_eq!(msg.checks_required, 4);
-    assert_eq!(msg.min_answer_tokens, 32);
+    assert_eq!(msg.checks_required, CHECKS, "двух проверок хватает");
     assert_eq!(msg.pinned_model, MODEL);
     assert_eq!(msg.pinned_runtime, RUNTIME);
     assert_eq!(msg.pinned_dtype, DTYPE);
+    assert_eq!(msg.pinned_arch, ARCH, "класс назван в листе");
+    assert_eq!(msg.kernel_cache_hash, CACHE,
+               "кеш ядер тот, что опубликован в daemon/kernel-cache/sm_89");
+    assert_eq!(msg.conformance_limit_micro, 0,
+               "предел пробы нулевой: внутри класса честное расхождение ровно 0");
     assert_eq!(msg.verifier_fee_bps, FEE_BPS);
     // Решено 14 октября: залог 30 400 AXM, расчёт родной монетой,
     // конфискат по адресу (BankMsg::Burn на самой Axiome не проверен).
@@ -1650,9 +1763,8 @@ fn list_razvyortyvaniya_razbiraetsya_kontraktom() {
     assert_eq!(
         msg.conformance_ref_hash,
         "ed6a265b272006ac9279a7fee66c7e243ed6586fe87b0bd6526257c83a7da2b1",
-        "эталон пробы тот же, что в daemon/probe/probe.json"
+        "эталон пробы тот же, что в daemon/probe/probe-v2-sm89.json"
     );
-    assert_eq!(msg.conformance_limit_micro, 60_000, "предел, выведенный из замеров");
 }
 
 // --- долю платит заказчик -------------------------------------------------
@@ -1711,7 +1823,7 @@ fn ispolnitel_poluchaet_cenu_celikom() {
     setup_native(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "settled"
@@ -1732,13 +1844,14 @@ fn povyshenie_doli_ne_urezaet_vyruchku_ispolnitelya() {
     let id = native_job_until_answered(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            admin: None, attestor: None, checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None, settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: Some(5_000), forfeit: None,
         }).unwrap();
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "settled"
@@ -1766,7 +1879,7 @@ fn dolya_delitsya_vverh_a_ostatok_vozvrashchaetsya_zakazchiku() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::SubmitAnswer { job_id: id, answer_hash: "a".into(),
             logprobs_hash: "l".into(), answer_tokens: 120 }).unwrap();
-    submit_checks(deps.as_mut(), id, &[HONEST_MEAN; 4]);
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
@@ -1793,7 +1906,7 @@ fn pri_podloge_zakazchiku_vozvrashchaetsya_cena_a_ne_vsyo() {
     setup_native(deps.as_mut());
     register_and_attest(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
-    submit_checks(deps.as_mut(), id, &[FRAUD_MIN; 4]);
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "guilty" && a.value == "true"));
@@ -1814,8 +1927,9 @@ fn administratora_mozhno_smenit() {
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
             admin: Some(new_admin.into()), attestor: None,
-            threshold_micro: None, checks_required: None,
-            min_answer_tokens: None, pinned_model: None, pinned_runtime: None,
+            checks_required: None,
+            pinned_arch: None, kernel_cache_hash: None,
+            pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None, settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: None, forfeit: None,
@@ -1823,8 +1937,8 @@ fn administratora_mozhno_smenit() {
     // Прежний администратор больше ничего не правит.
     let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: Some(1),
-            checks_required: None, min_answer_tokens: None,
+            admin: None, attestor: None,
+            checks_required: Some(1), pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None, min_stake: None,
@@ -1834,8 +1948,8 @@ fn administratora_mozhno_smenit() {
     // А новый — правит.
     execute(deps.as_mut(), mock_env(), mock_info(new_admin, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, threshold_micro: Some(40_000),
-            checks_required: None, min_answer_tokens: None,
+            admin: None, attestor: None,
+            checks_required: Some(3), pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None, min_stake: None,

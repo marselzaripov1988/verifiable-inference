@@ -30,12 +30,15 @@ class ChainUnavailable(Exception):
 @dataclass(frozen=True)
 class Params:
     """Параметры протокола. Единственный источник — цепочка."""
-    threshold_micro: int
     checks_required: int
-    min_answer_tokens: int
     pinned_model: str
     pinned_runtime: str
     pinned_dtype: str
+    #: Остальная часть класса. Вердикт внутри класса выносится равенством
+    #: хэшей, а не порогом, и без общего кеша ядер узлы класса считают
+    #: по-разному в последнем бите.
+    pinned_arch: str
+    kernel_cache_hash: str
     #: Чем идёт расчёт: {"native": "uaxm"} либо {"cw20": "axm1…"}.
     #: Вариантом, а не строкой: контракт умеет оба, и демону надо знать
     #: не только имя единицы, но и КАК она платится.
@@ -79,8 +82,9 @@ def load_params(rest, contract):
     протоколе вместо того, которое записано в цепочке.
     """
     d = query_smart(rest, contract, {"config": {}})
-    need = ("threshold_micro", "checks_required", "min_answer_tokens",
+    need = ("checks_required",
             "pinned_model", "pinned_runtime", "pinned_dtype",
+            "pinned_arch", "kernel_cache_hash",
             "settlement", "stake_denom",
             "conformance_limit_micro", "conformance_ref_hash",
             "conformance_lens", "conformance_version")
@@ -88,12 +92,12 @@ def load_params(rest, contract):
     if miss:
         raise ChainUnavailable(f"в настройках нет полей: {miss}")
     return Params(
-        threshold_micro=int(d["threshold_micro"]),
         checks_required=int(d["checks_required"]),
-        min_answer_tokens=int(d["min_answer_tokens"]),
         pinned_model=d["pinned_model"],
         pinned_runtime=d["pinned_runtime"],
         pinned_dtype=d["pinned_dtype"],
+        pinned_arch=d["pinned_arch"],
+        kernel_cache_hash=d["kernel_cache_hash"],
         settlement=d["settlement"],
         stake_denom=d["stake_denom"],
         conformance_limit_micro=int(d["conformance_limit_micro"]),
@@ -129,28 +133,61 @@ def conformance_problems(params, record):
     return []
 
 
-def check_node_matches(params, actual_model, actual_runtime, actual_dtype):
-    """Сверка ИМЁН связки с тем, что записано в цепочке.
+def check_node_matches(params, actual_model, actual_runtime, actual_dtype,
+                       actual_arch=None, actual_cache_hash=None):
+    """Сверка ИМЁН класса с тем, что записано в цепочке.
 
     Этого НЕДОСТАТОЧНО, и это замерено: на одной карте, с той же моделью,
     той же версией и тем же dtype, --enforce-eager против пути по
-    умолчанию дал расхождение до 413 488 — внутри полосы подлога. Все три
-    имени при этом совпадают. Поэтому после сверки имён узел обязан
-    пройти пробу на эталонном векторе (conformance.py).
+    умолчанию не дал ни одного побитового совпадения. Все три имени при
+    этом совпадают. Поэтому после сверки имён узел обязан пройти пробу на
+    эталонном векторе (conformance.py), а её допуск нулевой.
+
+    Архитектура и хэш кеша ядер сверяются здесь же, если переданы. Они
+    такая же часть класса: при другом кеше честные узлы расходятся в
+    последнем бите, и равенство хэшей — то есть вердикт — становится
+    невозможным. Ложь о хэше ловится всё той же пробой.
 
     Возвращает список расхождений. Пустой список — имена сошлись.
     Решение отказаться принимает вызывающий, но список он получает
     полный: знать надо обо всех расхождениях, а не о первом.
     """
     bad = []
-    for what, want, got in (
+    pairs = [
         ("модель", params.pinned_model, actual_model),
         ("рантайм", params.pinned_runtime, actual_runtime),
         ("dtype", params.pinned_dtype, actual_dtype),
-    ):
+    ]
+    if actual_arch is not None:
+        pairs.append(("архитектура", params.pinned_arch, actual_arch))
+    if actual_cache_hash is not None:
+        pairs.append(("кеш ядер", params.kernel_cache_hash, actual_cache_hash))
+    for what, want, got in pairs:
         if want != got:
             bad.append(f"{what}: цепочка ждёт {want!r}, на узле {got!r}")
     return bad
+
+
+def cache_hash(path):
+    """sha256 раздаваемого архива кеша ядер.
+
+    Сверяется именно АРХИВ, а не собранный самостоятельно кеш: упаковка
+    воспроизводима только при одинаковом содержимом, а у двух карт,
+    дающих тождественные векторы, содержимое файлов различается. Доказать
+    хэшем равнозначность своей сборки нельзя — и не нужно, узел обязан
+    пользоваться раздаваемым архивом.
+
+    Сверка не формальность: при переносе архива на проверочную карту
+    передача однажды оборвалась, архив вышел на 32 КБ короче, и хэш это
+    поймал. Без сверки узел поднялся бы на половине кеша и выпал из
+    класса, не узнав об этом.
+    """
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def normalize_runtime(version):

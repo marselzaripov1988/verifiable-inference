@@ -86,8 +86,6 @@ def main():
     p.add_argument("--contract", help="адрес контракта")
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--address", help="свой адрес: с ним сверяется состояние пробы")
-    p.add_argument("--threshold-micro", type=int, default=None,
-                   help="только для проверки демона; в сети порог из цепочки")
     a = p.parse_args()
 
     params = None
@@ -97,13 +95,6 @@ def main():
         except chain.ChainUnavailable as e:
             print(f"ОТКАЗ: параметры из цепочки не получены: {e}", file=sys.stderr)
             return 1
-    threshold = (params.threshold_micro if params
-                 else a.threshold_micro if a.threshold_micro is not None
-                 else None)
-    if threshold is None:
-        print("ОТКАЗ: порог неизвестен. Либо --rest с --contract, либо "
-              "--threshold-micro для проверки демона.", file=sys.stderr)
-        return 1
 
     with open(a.producer_vector, encoding="utf-8") as f:
         pv = json.load(f)["vector"]
@@ -115,9 +106,18 @@ def main():
             a.producer_hash, params=params, dtype=a.dtype, record=record)
     if r is None:
         return 1
+    # Вердикт выносит контракт равенством хэшей, а не демон порогом.
+    # Расхождение печатается как свидетельство: по нему видно, НАСКОЛЬКО
+    # разошлись, а решает совпадение хэша с обязательством исполнителя.
     d = r["divergence_micro"]
-    print(f"расхождение {d} микродолей, порог {threshold} — "
-          f"{'ПРЕВЫШЕН' if d >= threshold else 'в норме'}", file=sys.stderr)
+    if a.producer_hash:
+        same = r["msg"]["submit_check"]["logprobs_hash"] == a.producer_hash
+    else:
+        same = None
+    verdict = ("хэш совпал" if same else
+               "ХЭШ НЕ СОВПАЛ" if same is False else
+               "обязательство не передано, сверить нечем")
+    print(f"расхождение {d} микродолей; {verdict}", file=sys.stderr)
     print(json.dumps(r["msg"], ensure_ascii=False))
     return 0
 

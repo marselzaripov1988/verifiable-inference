@@ -118,12 +118,12 @@ pub fn instantiate(
     let cfg = Config {
         admin: deps.api.addr_validate(&msg.admin)?,
         attestor: deps.api.addr_validate(&msg.attestor)?,
-        threshold_micro: msg.threshold_micro,
         checks_required: msg.checks_required,
-        min_answer_tokens: msg.min_answer_tokens,
         pinned_model: msg.pinned_model,
         pinned_runtime: msg.pinned_runtime,
         pinned_dtype: msg.pinned_dtype,
+        pinned_arch: msg.pinned_arch,
+        kernel_cache_hash: msg.kernel_cache_hash,
         conformance_limit_micro: msg.conformance_limit_micro,
         conformance_ref_hash: msg.conformance_ref_hash,
         conformance_lens: msg.conformance_lens,
@@ -158,12 +158,12 @@ pub fn execute(
         ExecuteMsg::UpdateConfig {
             admin,
             attestor,
-            threshold_micro,
             checks_required,
-            min_answer_tokens,
             pinned_model,
             pinned_runtime,
             pinned_dtype,
+            pinned_arch,
+            kernel_cache_hash,
             conformance_limit_micro,
             conformance_ref,
             settlement,
@@ -176,12 +176,12 @@ pub fn execute(
             info,
             admin,
             attestor,
-            threshold_micro,
             checks_required,
-            min_answer_tokens,
             pinned_model,
             pinned_runtime,
             pinned_dtype,
+            pinned_arch,
+            kernel_cache_hash,
             conformance_limit_micro,
             conformance_ref,
             settlement,
@@ -195,7 +195,16 @@ pub fn execute(
             runtime,
             dtype,
             card_class,
-        } => register_executor(deps, info, model, runtime, dtype, card_class),
+            kernel_cache_hash,
+        } => register_executor(
+            deps,
+            info,
+            model,
+            runtime,
+            dtype,
+            card_class,
+            kernel_cache_hash,
+        ),
         ExecuteMsg::Attest { executor, eligible } => attest(deps, info, executor, eligible),
         ExecuteMsg::SetSuspended {
             executor,
@@ -244,12 +253,12 @@ fn update_config(
     info: MessageInfo,
     admin: Option<String>,
     attestor: Option<String>,
-    threshold_micro: Option<Micro>,
     checks_required: Option<u32>,
-    min_answer_tokens: Option<u32>,
     pinned_model: Option<String>,
     pinned_runtime: Option<String>,
     pinned_dtype: Option<String>,
+    pinned_arch: Option<String>,
+    kernel_cache_hash: Option<String>,
     conformance_limit_micro: Option<Micro>,
     conformance_ref: Option<ConformanceRef>,
     settlement: Option<Settlement>,
@@ -270,17 +279,11 @@ fn update_config(
     if let Some(a) = attestor {
         cfg.attestor = deps.api.addr_validate(&a)?;
     }
-    if let Some(t) = threshold_micro {
-        cfg.threshold_micro = t;
-    }
     if let Some(c) = checks_required {
         if c == 0 {
             return Err(ContractError::ZeroChecks);
         }
         cfg.checks_required = c;
-    }
-    if let Some(m) = min_answer_tokens {
-        cfg.min_answer_tokens = m;
     }
     // Смена связки или эталона обнуляет все выданные пробы: проба
     // свидетельствует о соответствии КОНКРЕТНОЙ настройке. Иначе узел,
@@ -297,6 +300,16 @@ fn update_config(
     if let Some(d) = pinned_dtype {
         rotate |= d != cfg.pinned_dtype;
         cfg.pinned_dtype = d;
+    }
+    // Архитектура и кеш ядер — такая же часть связки, как модель: при
+    // другом кеше узлы класса считают по-разному в последнем бите.
+    if let Some(a) = pinned_arch {
+        rotate |= a != cfg.pinned_arch;
+        cfg.pinned_arch = a;
+    }
+    if let Some(k) = kernel_cache_hash {
+        rotate |= k != cfg.kernel_cache_hash;
+        cfg.kernel_cache_hash = k;
     }
     if let Some(l) = conformance_limit_micro {
         cfg.conformance_limit_micro = l;
@@ -348,16 +361,29 @@ fn register_executor(
     runtime: String,
     dtype: String,
     card_class: String,
+    kernel_cache_hash: String,
 ) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
-    // Связка проверяется ЗДЕСЬ, а не при выдаче задания: порог
-    // действителен только для неё, и пускать чужую версию внутрь, чтобы
-    // отклонить позже, незачем.
+    // Связка проверяется ЗДЕСЬ, а не при выдаче задания: вердикт
+    // действителен только внутри класса, и пускать чужую версию внутрь,
+    // чтобы отклонить позже, незачем.
     if model != cfg.pinned_model || runtime != cfg.pinned_runtime || dtype != cfg.pinned_dtype {
         return Err(ContractError::WrongPinning {
             model,
             runtime,
             dtype,
+        });
+    }
+    // Архитектура и кеш ядер — остальная часть класса.
+    //
+    // Заявление узла само по себе ничего не доказывает, и проверить его
+    // контракт не может. Доказывает проба: при нулевом допуске узел с
+    // другими ядрами на ней не сойдётся. Здесь отсекается явное
+    // несоответствие, чтобы такой узел не дошёл до пробы впустую.
+    if card_class != cfg.pinned_arch || kernel_cache_hash != cfg.kernel_cache_hash {
+        return Err(ContractError::WrongClass {
+            arch: card_class,
+            kernel_cache_hash,
         });
     }
     if EXECUTORS.has(deps.storage, &info.sender) {
@@ -371,6 +397,7 @@ fn register_executor(
             runtime,
             dtype,
             card_class,
+            kernel_cache_hash,
             status: ExecutorStatus::Pending,
             jobs_done: 0,
             convictions: 0,
@@ -831,7 +858,8 @@ fn submit_answer(
     logprobs_hash: String,
     answer_tokens: u32,
 ) -> Result<Response, ContractError> {
-    let cfg = CONFIG.load(deps.storage)?;
+    // Настройки здесь больше не нужны: гейт по длине ответа убран, а он
+    // был единственным, что отсюда их читало.
     let mut job = JOBS
         .may_load(deps.storage, job_id)?
         .ok_or(ContractError::JobUnknown)?;
@@ -844,14 +872,10 @@ fn submit_answer(
     if job.executor.as_ref() != Some(&info.sender) {
         return Err(ContractError::NotYourJob);
     }
-    // Короткий ответ отклоняется на сдаче, а не на проверке: ниже границы
-    // способ не работает вовсе, и собирать по нему проверки бессмысленно.
-    if answer_tokens < cfg.min_answer_tokens {
-        return Err(ContractError::AnswerTooShort {
-            got: answer_tokens,
-            need: cfg.min_answer_tokens,
-        });
-    }
+    // Гейта по длине ответа больше нет. Он стоял затем, что на коротких
+    // ответах запас порога падал; порога нет, а равенство хэшей от длины
+    // не зависит. Замерено и прямо: отсечка по длине ответа пересечения
+    // полос не убирала ни при 32 токенах, ни при 128.
     job.answer_hash = Some(answer_hash);
     job.logprobs_hash = Some(logprobs_hash);
     job.answer_tokens = Some(answer_tokens);
@@ -957,14 +981,31 @@ fn load_checks(deps: Deps, job_id: u64) -> StdResult<Vec<Check>> {
         .collect()
 }
 
-/// Правило. То же, что в protocol/verify.py: виновен, только если ВСЕ
-/// проверки превысили порог.
+/// Правило: виновен, только если хэш вектора НЕ совпал у всех
+/// проверяющих. Порога больше нет.
 ///
-/// Почему не «хотя бы одна»: подлог превышает порог в 100% случаев,
-/// честный узел в 0,26%. При таком соотношении конъюнкция перемножает
-/// долю ложных обвинений, а дизъюнкция её складывает. Замерено: при
-/// потоке 2,14 млн ответов в сутки две проверки дают пятнадцать ложных
-/// обвинений в сутки на честную карту, четыре — 0,04 в год.
+/// ПОЧЕМУ НЕ ПОРОГ. Замерено на корпусе из 662 различных запросов:
+/// честное расхождение между архитектурами доходит до 37 683, а подлог
+/// FP8 начинается с 19 629 — полосы пересекаются, отношение 0,52x.
+/// Порога между ними не существует, и прежние 36 000 лежали внутри
+/// обеих полос. Прежнее разделение держалось на наборе из сорока
+/// запросов и было свойством набора, а не правила. Отсечка по длине и
+/// другие статистики (медиана, p99, максимум, доля токенов выше порога,
+/// корень из среднего квадрата) не спасают ни одна.
+///
+/// ПОЧЕМУ РАВЕНСТВО РАБОТАЕТ. Внутри класса — та же архитектура и тот же
+/// закреплённый кеш ядер — честные узлы дают ПОБИТОВО ОДИНАКОВЫЕ
+/// векторы: 334 из 334 текстов на второй карте, другой машине и другом
+/// драйвере. А всё, что меняет арифметику, не совпадает ни на одном
+/// тексте: неверный режим, FP8, AWQ4.
+///
+/// ДВЕ СТУПЕНИ, А НЕ ОДНА. Чужая связка даёт не обвинение, а ОТСУТСТВИЕ
+/// вердикта: такой узел не проходит пробу и до проверки не допускается
+/// (см. `conformant`). Обвиняет только несовпадение хэша у того, кто
+/// пробу прошёл. Иначе один бит, набежавший от патча рантайма или сбоя
+/// памяти, разорял бы честного — а при нулевом допуске такой бит
+/// возможен: тот же разный блок свёртки уводит Ampere на 20 053, а Ada
+/// всего на 6 миллионных, и обе величины одинаково ломают равенство.
 fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
     let mut job = JOBS
@@ -986,11 +1027,17 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
             need: cfg.checks_required,
         });
     }
-    let exceeded = checks
+    // Обязательство исполнителя. Без него сравнивать не с чем, и это не
+    // «нет вердикта», а порченое задание: вектор обязан быть сдан.
+    let commitment = job
+        .logprobs_hash
+        .clone()
+        .ok_or(ContractError::EmptyVector)?;
+    let mismatched = checks
         .iter()
-        .filter(|c| c.divergence_micro >= cfg.threshold_micro)
+        .filter(|c| c.logprobs_hash != commitment)
         .count() as u32;
-    let guilty = exceeded == cfg.checks_required;
+    let guilty = mismatched == cfg.checks_required;
 
     let executor = job.executor.clone().ok_or(ContractError::NotYourJob)?;
     let mut e = EXECUTORS
@@ -1074,7 +1121,7 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
         .add_messages(msgs)
         .add_attribute("action", "finalize")
         .add_attribute("job_id", job_id.to_string())
-        .add_attribute("exceeded", exceeded.to_string())
+        .add_attribute("mismatched", mismatched.to_string())
         .add_attribute("guilty", guilty.to_string())
         .add_attribute("verifier_fees", paid_fees.to_string())
         .add_attribute("fee_returned", fee_left.to_string())
@@ -1168,13 +1215,13 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::Job { job_id } => to_json_binary(&JOBS.load(deps.storage, job_id)?),
         QueryMsg::Checks { job_id } => {
-            let cfg = CONFIG.load(deps.storage)?;
             let checks = load_checks(deps, job_id)?;
-            let exceeded = checks
-                .iter()
-                .filter(|c| c.divergence_micro >= cfg.threshold_micro)
-                .count() as u32;
-            to_json_binary(&ChecksResponse { checks, exceeded })
+            let job = JOBS.load(deps.storage, job_id)?;
+            let mismatched = match job.logprobs_hash {
+                Some(h) => checks.iter().filter(|c| c.logprobs_hash != h).count() as u32,
+                None => 0,
+            };
+            to_json_binary(&ChecksResponse { checks, mismatched })
         }
     }
 }

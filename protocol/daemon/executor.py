@@ -106,10 +106,10 @@ def main():
         except chain.ChainUnavailable as e:
             print(f"ОТКАЗ: параметры из цепочки не получены: {e}", file=sys.stderr)
             return 1
-        print(f"параметры из цепочки: порог {params.threshold_micro}, "
-              f"проверок {params.checks_required}, "
-              f"связка {params.pinned_model}/{params.pinned_runtime}/"
-              f"{params.pinned_dtype}", file=sys.stderr)
+        print(f"параметры из цепочки: проверок {params.checks_required}, "
+              f"класс {params.pinned_model}/{params.pinned_runtime}/"
+              f"{params.pinned_dtype}/{params.pinned_arch}, "
+              f"кеш ядер {params.kernel_cache_hash[:16]}…", file=sys.stderr)
     else:
         print("ВНИМАНИЕ: работа без параметров из цепочки — только для "
               "проверки самого демона, не для сети", file=sys.stderr)

@@ -7,12 +7,12 @@ use crate::state::{Check, Forfeit, Micro, MicroLog, Settlement};
 pub struct InstantiateMsg {
     pub admin: String,
     pub attestor: String,
-    pub threshold_micro: Micro,
     pub checks_required: u32,
-    pub min_answer_tokens: u32,
     pub pinned_model: String,
     pub pinned_runtime: String,
     pub pinned_dtype: String,
+    pub pinned_arch: String,
+    pub kernel_cache_hash: String,
     pub conformance_limit_micro: Micro,
     pub conformance_ref_hash: String,
     pub conformance_lens: Vec<u32>,
@@ -38,12 +38,12 @@ pub enum ExecuteMsg {
         /// в новом ключе.
         admin: Option<String>,
         attestor: Option<String>,
-        threshold_micro: Option<Micro>,
         checks_required: Option<u32>,
-        min_answer_tokens: Option<u32>,
         pinned_model: Option<String>,
         pinned_runtime: Option<String>,
         pinned_dtype: Option<String>,
+        pinned_arch: Option<String>,
+        kernel_cache_hash: Option<String>,
         conformance_limit_micro: Option<Micro>,
         /// Новый эталон пробы. Меняется только целиком — хэш и длины
         /// вместе, иначе раскрытую склейку разрежут не по тем границам.
@@ -63,6 +63,10 @@ pub enum ExecuteMsg {
         runtime: String,
         dtype: String,
         card_class: String,
+        /// Какой кеш ядер поставил узел. Обязан совпасть с настройкой:
+        /// без общего кеша узлы класса считают по-разному в последнем
+        /// бите, и сверка хэшей невозможна.
+        kernel_cache_hash: String,
     },
     /// Подтверждение допуска. Только от attestor — см. state::Config.
     Attest { executor: String, eligible: bool },
@@ -189,7 +193,8 @@ pub enum QueryMsg {
 #[cw_serde]
 pub struct ChecksResponse {
     pub checks: Vec<Check>,
-    /// Сколько из сданных превысило порог. Удобно для наблюдения, но
-    /// вердикт считается в Finalize, а не здесь.
-    pub exceeded: u32,
+    /// У скольких из сданных хэш НЕ совпал с обязательством исполнителя.
+    /// Удобно для наблюдения, но вердикт считается в Finalize, а не
+    /// здесь.
+    pub mismatched: u32,
 }
