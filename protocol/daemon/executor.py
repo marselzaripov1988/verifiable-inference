@@ -71,8 +71,28 @@ def run(base, model, job_id, prompt, max_tokens, out_vector,
     v = canon.require_nonempty(canon.to_micro(logprobs))
 
     if out_vector:
+        # Связка для проверяющих: ЗАПРОС, ОТВЕТ и вектор в одном файле.
+        #
+        # Текст тут главное, а вектор — нет. Проверяющему, чтобы работать,
+        # нужны именно запрос и ответ: он оценивает их сам и сдаёт свой
+        # хэш, а вердикт выносит контракт сравнением хэшей. Вектор лежит
+        # рядом только для свидетельства — по нему видно, НАСКОЛЬКО
+        # разошлись, — и при споре раскрывается на цепочке.
+        #
+        # Отдавать связку можно откуда угодно и кому угодно: подмена
+        # ловится сверкой с `prompt_hash` и `answer_hash` из задания,
+        # которую проверяющий делает до всякой работы. Поэтому доставка
+        # не требует доверия — только того, чтобы кто-то её отдавал.
         with open(out_vector, "w", encoding="utf-8") as f:
-            json.dump({"job_id": job_id, "vector": v}, f)
+            json.dump({
+                "job_id": job_id,
+                "prompt": prompt,
+                "answer": answer,
+                "prompt_hash": hashlib.sha256(prompt.encode()).hexdigest(),
+                "answer_hash": hashlib.sha256(answer.encode()).hexdigest(),
+                "logprobs_hash": canon.commit_hash(v),
+                "vector": v,
+            }, f, ensure_ascii=False)
 
     msg = {
         "submit_answer": {

@@ -11,9 +11,28 @@
 контракт при споре пересчитывает расхождение сам и ловит того, кто
 назвал число, не сходящееся с его же вектором.
 
-Вектор исполнителя берётся вне цепочки — в цепочке только его хэш.
-Поэтому первым делом демон СВЕРЯЕТ полученный вектор с обязательством и
-отказывается работать, если он не тот.
+ЧТО НУЖНО ДОСТАВИТЬ ПРОВЕРЯЮЩЕМУ, а что нет.
+
+**Вектор исполнителя не нужен.** При правиле «равенство хэшей» он не
+участвует в вердикте вовсе: проверяющий оценивает текст и сдаёт СВОЙ
+хэш, а сравнивает их контракт. Прежде вектор был обязателен, потому что
+демон считал расхождение и по нему решалось дело. Теперь расхождение —
+только свидетельство: дали вектор — считается, не дали — сдаётся ноль.
+При споре оба вектора раскрываются НА ЦЕПОЧКЕ, то есть доставку там
+берёт на себя она.
+
+**А вот запрос и ответ нужны, и их обязательно сверять с цепочкой.**
+Текст приходит вне цепочки, и подменить его может кто угодно на пути
+доставки. Проверяющий оценил бы не то, его хэш не совпал бы с хэшем
+исполнителя, и при нулевом допуске это обвинило бы ЧЕСТНОГО — причём
+тихо, выглядело бы как подлог. Двум проверяющим можно подсунуть одну и
+ту же подмену, так что правило «не совпало у всех» от этого не спасает.
+
+Поэтому демон СВЕРЯЕТ полученный текст с `prompt_hash` и `answer_hash`
+из задания и отказывается работать, если текст не тот. Это и делает
+доставку недоверенной: брать текст можно откуда угодно, в том числе у
+самого исполнителя. Остаётся вопрос живости — если текст не отдаёт
+никто, задание просто не проверить, — но это не вопрос правильности.
 """
 
 import argparse
@@ -25,15 +44,48 @@ import chain
 import vllm_client as vllm
 
 
-def run(base, model, job_id, prompt, answer, producer_vector, producer_hash,
-        params=None, dtype="bfloat16", record=None):
-    # Сверка до всякой работы: если вектор не тот, которым обязались,
-    # считать по нему нечего — результат был бы про чужие данные.
-    got = canon.commit_hash(producer_vector)
-    if producer_hash and got != producer_hash:
-        print(f"ОТКАЗ: вектор исполнителя не сходится с обязательством\n"
-              f"  получен:  {got}\n  обязался: {producer_hash}", file=sys.stderr)
-        return None
+def load_bundle(src):
+    """Связка от исполнителя: файл или http(s)-ссылка.
+
+    Откуда взята — неважно, и это главное свойство. Подмена ловится
+    сверкой с `prompt_hash` и `answer_hash` из задания, поэтому отдавать
+    связку может сам исполнитель, зеркало, сосед — кто угодно. Доверия
+    доставка не требует; требует только того, чтобы кто-то отдавал.
+    """
+    if src.startswith(("http://", "https://")):
+        import urllib.request
+        req = urllib.request.Request(
+            src, headers={"User-Agent": "verifiable-inference-checker/0.1"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return json.loads(r.read())
+    with open(src, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def run(base, model, job_id, prompt, answer, producer_vector=None,
+        producer_hash=None, params=None, dtype="bfloat16", record=None,
+        job=None):
+    # Сверка ТЕКСТА с цепочкой — до всякой работы и без исключений:
+    # подменённый текст даёт несовпадение хэшей, а это обвинение честного.
+    if job is not None:
+        bad = chain.job_problems(job, prompt, answer)
+        if bad:
+            for b in bad:
+                print(f"ОТКАЗ: {b}", file=sys.stderr)
+            return None
+    else:
+        print("ВНИМАНИЕ: текст не сверен с цепочкой — только для проверки "
+              "самого демона, не для сети", file=sys.stderr)
+
+    # Вектор исполнителя необязателен: в вердикте он не участвует. Но
+    # если дан, обязан сходиться со своим обязательством — иначе
+    # расхождение считалось бы про чужие данные.
+    if producer_vector is not None:
+        got = canon.commit_hash(producer_vector)
+        if producer_hash and got != producer_hash:
+            print(f"ОТКАЗ: вектор исполнителя не сходится с обязательством\n"
+                  f"  получен:  {got}\n  обязался: {producer_hash}", file=sys.stderr)
+            return None
 
     if params is not None:
         try:
@@ -56,7 +108,9 @@ def run(base, model, job_id, prompt, answer, producer_vector, producer_hash,
 
     logprobs = vllm.score(base, model, prompt + answer)
     mine = canon.require_nonempty(canon.to_micro(logprobs))
-    d = canon.divergence_micro(producer_vector, mine)
+    # Расхождение — свидетельство, а не вердикт. Без вектора исполнителя
+    # его не посчитать, и это не мешает: контракт сравнивает хэши.
+    d = canon.divergence_micro(producer_vector, mine) if producer_vector else 0
 
     return {
         "msg": {
@@ -78,8 +132,12 @@ def main():
     p.add_argument("--job-id", type=int, required=True)
     p.add_argument("--prompt", required=True)
     p.add_argument("--answer", required=True)
-    p.add_argument("--producer-vector", required=True,
-                   help="файл от исполнителя: {job_id, vector}")
+    p.add_argument("--bundle",
+                   help="связка от исполнителя: файл или http(s)-ссылка. "
+                        "Откуда угодно: подмена ловится сверкой с цепочкой")
+    p.add_argument("--producer-vector",
+                   help="только вектор, без текста. Необязателен: в вердикте "
+                        "вектор не участвует, он нужен лишь для свидетельства")
     p.add_argument("--producer-hash",
                    help="обязательство из цепочки; без него сверка не делается")
     p.add_argument("--rest", help="REST цепочки; с ним порог берётся оттуда")
@@ -96,14 +154,33 @@ def main():
             print(f"ОТКАЗ: параметры из цепочки не получены: {e}", file=sys.stderr)
             return 1
 
-    with open(a.producer_vector, encoding="utf-8") as f:
-        pv = json.load(f)["vector"]
+    prompt, answer, pv = a.prompt, a.answer, None
+    if a.bundle:
+        b = load_bundle(a.bundle)
+        # Текст из связки, а не из командной строки: иначе сверять с
+        # цепочкой было бы нечего — сверялось бы то, что сам и подставил.
+        prompt = b.get("prompt", prompt)
+        answer = b.get("answer", answer)
+        pv = b.get("vector")
+    elif a.producer_vector:
+        with open(a.producer_vector, encoding="utf-8") as f:
+            pv = json.load(f)["vector"]
 
-    record = None
+    record = job = None
     if params is not None and a.address:
         record = chain.load_executor(a.rest, a.contract, a.address)
-    r = run(a.base_url, a.model, a.job_id, a.prompt, a.answer, pv,
-            a.producer_hash, params=params, dtype=a.dtype, record=record)
+    if a.rest and a.contract:
+        # Задание из цепочки: в нём хэши текста, без которых доставку
+        # нечем проверить.
+        try:
+            job = chain.load_job(a.rest, a.contract, a.job_id)
+        except chain.ChainUnavailable as e:
+            print(f"ОТКАЗ: задание из цепочки не получено: {e}",
+                  file=sys.stderr)
+            return 1
+    r = run(a.base_url, a.model, a.job_id, prompt, answer, pv,
+            a.producer_hash or (job or {}).get("logprobs_hash"),
+            params=params, dtype=a.dtype, record=record, job=job)
     if r is None:
         return 1
     # Вердикт выносит контракт равенством хэшей, а не демон порогом.

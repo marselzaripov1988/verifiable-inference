@@ -165,6 +165,7 @@ def main():
     test_conformance()
     test_shipped_probe()
     test_checker_needs_probe()
+    test_delivery()
 
     print()
     if fails:
@@ -463,6 +464,76 @@ def test_shipped_probe():
         ok(False, "неизвестная архитектура должна отвергаться")
     except conformance.ProbeMismatch:
         ok(True, "неизвестная архитектура — отказ, а не эталон чужого класса")
+
+
+def test_delivery():
+    """Доставка текста проверяющему: подмена обязана отвергаться.
+
+    Это не удобство, а защита от ложного обвинения. Текст приходит вне
+    цепочки; подмени его — проверяющий оценит не то, его хэш не совпадёт
+    с хэшем исполнителя, и при нулевом допуске контракт обвинит ЧЕСТНОГО.
+    Двум проверяющим можно подсунуть одну и ту же подмену, так что
+    правило «не совпало у всех» здесь не помогает.
+    """
+    import chain as ch
+    import checker as chk
+
+    print("### сверка текста с хэшами задания")
+    prompt, answer = "Назови пять простых чисел.", "  2, 3, 5, 7, 11"
+    job = {"prompt_hash": ch.text_hash(prompt),
+           "answer_hash": ch.text_hash(answer),
+           "logprobs_hash": "неважно"}
+    ok(ch.job_problems(job, prompt, answer) == [], "тот самый текст проходит")
+    bad = ch.job_problems(job, prompt + " ", answer)
+    ok(len(bad) == 1 and "запрос не тот" in bad[0],
+       "подменённый запрос отвергнут, и сказано какой именно")
+    bad = ch.job_problems(job, prompt, answer + ".")
+    ok(len(bad) == 1 and "ответ не тот" in bad[0], "подменённый ответ отвергнут")
+    ok(len(ch.job_problems({}, prompt, answer)) == 2,
+       "задания без хэшей недостаточно: сверять нечем, и это отказ")
+    ok(ch.job_problems({"prompt_hash": ch.text_hash(prompt)}, prompt, answer)
+       != [], "ответ ещё не сдан — работать не с чем")
+
+    print("\n### проверяющий отказывается от подменённого текста")
+    honest = [-0.5 - i * 0.001 for i in range(100)]
+    patch(FakeVllm(honest))
+    r = chk.run("http://x/v1", "m", 7, prompt, answer + " лишнее",
+                job=job)
+    ok(r is None, "подмена ловится ДО оценки, а не после")
+    r = chk.run("http://x/v1", "m", 7, prompt, answer, job=job)
+    ok(r is not None, "тот самый текст — работа идёт")
+
+    print("\n### вектор исполнителя больше не обязателен")
+    patch(FakeVllm(honest))
+    r = chk.run("http://x/v1", "m", 7, prompt, answer, job=job)
+    ok(r is not None and r["divergence_micro"] == 0,
+       "без вектора расхождение нулевое, и это не мешает: вердикт по хэшу")
+    ok("logprobs_hash" in r["msg"]["submit_check"],
+       "свой хэш сдаётся всё равно — им и выносится вердикт")
+    mine = [x - 0.0127 for x in honest]
+    patch(FakeVllm(mine))
+    pv = canon.to_micro(honest)
+    r = chk.run("http://x/v1", "m", 7, prompt, answer, producer_vector=pv,
+                producer_hash=canon.commit_hash(pv), job=job)
+    ok(r is not None and r["divergence_micro"] == 12_700,
+       f"с вектором считается свидетельство (вышло {r and r['divergence_micro']})")
+
+    print("\n### связка исполнителя читается и из файла")
+    import json as _json, os as _os, tempfile
+    bundle = {"job_id": 7, "prompt": prompt, "answer": answer,
+              "prompt_hash": ch.text_hash(prompt),
+              "answer_hash": ch.text_hash(answer),
+              "logprobs_hash": canon.commit_hash(pv), "vector": pv}
+    fd, path = tempfile.mkstemp(suffix=".json")
+    _os.close(fd)
+    with open(path, "w", encoding="utf-8") as f:
+        _json.dump(bundle, f, ensure_ascii=False)
+    got = chk.load_bundle(path)
+    ok(got["prompt"] == prompt and got["vector"] == pv,
+       "связка прочитана целиком: текст и вектор вместе")
+    ok(ch.job_problems(job, got["prompt"], got["answer"]) == [],
+       "и она сходится с хэшами задания")
+    _os.unlink(path)
 
 
 def test_checker_needs_probe():
