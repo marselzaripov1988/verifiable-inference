@@ -1771,6 +1771,71 @@ fn list_razvyortyvaniya_razbiraetsya_kontraktom() {
     );
 }
 
+#[test]
+fn listy_klassov_otlichayutsya_tolko_klassom() {
+    // Развёрнуто три экземпляра одного кода: по одному на модель карты.
+    // Отличать их имеет право РОВНО три поля — класс, кеш ядер и эталон
+    // пробы. Разойдись у них залог, доля или предел пробы — и сеть
+    // распалась бы на классы с разными правилами, чего никто не заметил
+    // бы до жалобы узла. Поэтому сверяется и то, что совпадает.
+    let listy: [(&str, &str, &str, &str); 3] = [
+        (include_str!("../deploy/instantiate.json"), "sm_89",
+         "3753554454f2c9b850c6ec0912a58e39ee08028012f3de1e9649e62d67cc131a",
+         "ed6a265b272006ac9279a7fee66c7e243ed6586fe87b0bd6526257c83a7da2b1"),
+        (include_str!("../deploy/instantiate-sm86.json"), "sm_86",
+         "9b1e2654869c5af7826d8f9427641ac8b9dfacdad04d8add408d11eb94555698",
+         "e0ff32b3e1cd41230ccfa6749e4581d8d43608e7559f130bb3c9e108b8fddaad"),
+        (include_str!("../deploy/instantiate-sm120.json"), "sm_120",
+         "c78d15d82f018c3ec29885d43720c07b0342cd06421c12237efa1b30f28e1a32",
+         "097293ab113371537180fc5d94f754419ac7e04cf4165b6d255b689228594a07"),
+    ];
+    let mut razobrannye = Vec::new();
+    for (raw, arch, _cache, _ref_hash) in listy.iter() {
+        let m: InstantiateMsg = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("лист класса {arch} не разобран: {e}"));
+        assert_eq!(&m.pinned_arch, arch, "класс назван в своём листе");
+        razobrannye.push(m);
+    }
+    let base = &razobrannye[0];
+    for (m, (_, arch, _, _)) in razobrannye.iter().zip(listy.iter()).skip(1) {
+        assert_eq!(m.checks_required, base.checks_required, "{arch}: проверок");
+        assert_eq!(m.pinned_model, base.pinned_model, "{arch}: модель");
+        assert_eq!(m.pinned_runtime, base.pinned_runtime, "{arch}: рантайм");
+        assert_eq!(m.pinned_dtype, base.pinned_dtype, "{arch}: точность");
+        assert_eq!(m.min_stake, base.min_stake, "{arch}: залог");
+        assert_eq!(m.verifier_fee_bps, base.verifier_fee_bps, "{arch}: доля");
+        assert_eq!(m.conformance_limit_micro, base.conformance_limit_micro,
+                   "{arch}: предел пробы");
+        assert_eq!(m.conformance_lens, base.conformance_lens,
+                   "{arch}: тексты пробы у классов одни и те же");
+        assert_eq!(m.admin, base.admin, "{arch}: админ");
+        assert_eq!(m.attestor, base.attestor, "{arch}: аттестор");
+    }
+    // Предел нулевой у ВСЕХ: класс меняет эталон, а не строгость.
+    for (m, (_, arch, _, _)) in razobrannye.iter().zip(listy.iter()) {
+        assert_eq!(m.conformance_limit_micro, 0, "{arch}: допуск нулевой");
+        assert_eq!(m.conformance_lens.len(), 34, "{arch}: 34 текста пробы");
+    }
+    // А три отличающих поля обязаны быть именно опубликованными: кеш из
+    // daemon/kernel-cache/<класс>/ и эталон из daemon/probe/.
+    for (m, (_, arch, cache, ref_hash)) in razobrannye.iter().zip(listy.iter()) {
+        assert_eq!(&m.kernel_cache_hash, cache,
+                   "{arch}: кеш ядер тот, что опубликован");
+        assert_eq!(&m.conformance_ref_hash, ref_hash,
+                   "{arch}: эталон пробы тот, что опубликован");
+    }
+    // И ни одно из трёх полей не повторяется между классами: иначе два
+    // класса считали бы себя одним.
+    for i in 0..razobrannye.len() {
+        for j in (i + 1)..razobrannye.len() {
+            let (a, b) = (&razobrannye[i], &razobrannye[j]);
+            assert_ne!(a.pinned_arch, b.pinned_arch);
+            assert_ne!(a.kernel_cache_hash, b.kernel_cache_hash);
+            assert_ne!(a.conformance_ref_hash, b.conformance_ref_hash);
+        }
+    }
+}
+
 // --- долю платит заказчик -------------------------------------------------
 //
 // Решено 14 октября. До этого доля вычиталась из цены, и исполнитель

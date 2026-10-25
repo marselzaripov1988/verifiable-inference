@@ -432,7 +432,7 @@ def test_shipped_probe():
     """
     import conformance
 
-    for arch in ("sm_86", "sm_89"):
+    for arch in ("sm_86", "sm_89", "sm_120"):
         print(f"### эталон класса {arch}")
         path = conformance.probe_path_for(arch)
         p = conformance.load_probe(path)
@@ -450,13 +450,17 @@ def test_shipped_probe():
            f"{arch}: назван кеш ядер, на котором снят эталон")
 
     print("### эталоны классов различны")
-    a = conformance.load_probe(conformance.probe_path_for("sm_86"))
-    b = conformance.load_probe(conformance.probe_path_for("sm_89"))
-    ok(a["texts"] == b["texts"], "тексты у классов одни и те же")
-    ok(a["ref_hash"] != b["ref_hash"],
-       "а эталонные векторы разные: между архитектурами равенства не бывает")
-    ok(sum(1 for x, y in zip(a["ref"], b["ref"]) if x == y) == 0,
-       "ни один текст не совпал между Ampere и Ada")
+    probes = {arch: conformance.load_probe(conformance.probe_path_for(arch))
+              for arch in ("sm_86", "sm_89", "sm_120")}
+    pairs = (("sm_86", "sm_89"), ("sm_86", "sm_120"), ("sm_89", "sm_120"))
+    for x, y in pairs:
+        a, b = probes[x], probes[y]
+        ok(a["texts"] == b["texts"], f"{x} и {y}: тексты одни и те же")
+        ok(a["ref_hash"] != b["ref_hash"],
+           f"{x} и {y}: эталонные векторы разные — между классами равенства "
+           "не бывает")
+        ok(sum(1 for u, v in zip(a["ref"], b["ref"]) if u == v) == 0,
+           f"{x} и {y}: не совпал ни один текст")
 
     print("### чужой класс не подсунуть")
     try:

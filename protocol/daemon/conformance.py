@@ -58,6 +58,7 @@ import vllm_client as vllm
 PROBE_BY_ARCH = {
     "sm_86": "probe-v2-sm86.json",
     "sm_89": "probe-v2-sm89.json",
+    "sm_120": "probe-v2-sm120.json",
 }
 PROBE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe")
 PROBE_PATH = os.path.join(PROBE_DIR, "probe-v2-sm89.json")

@@ -1,0 +1,72 @@
+{
+ "note": "Третий класс: Blackwell, RTX 5090. 25 октября 2026. Собран канонический кеш ядер и снят эталон пробы, затем проверено на ВТОРОЙ RTX 5090 другой машины с другим драйвером. Мера расхождения — canon.divergence_micro, та же, что во всех прежних замерах.",
+ "svyazka": {
+  "model": "Qwen/Qwen2.5-7B-Instruct",
+  "runtime": "vllm-0.31.0 (образ vllm/vllm-openai:v0.31.0)",
+  "torch": "2.13.0+cu130",
+  "dtype": "bfloat16",
+  "compute_capability": "(12, 0)",
+  "flagi": [
+   "--no-enable-flashinfer-autotune",
+   "inductor_compile_config.combo_kernels = false",
+   "inductor_compile_config.benchmark_combo_kernel = false",
+   "inductor_compile_config.enable_auto_functionalized_v2 = false"
+  ],
+  "attention_backend": "FLASH_ATTN, FlashAttention 2",
+  "kv_cache_tokens": 240448,
+  "config_summary_md5": "bd7f93a50271ec12f5a31a541d17627c"
+ },
+ "kernel_cache": {
+  "sha256": "c78d15d82f018c3ec29885d43720c07b0342cd06421c12237efa1b30f28e1a32",
+  "bytes": 2767373,
+  "files": 424,
+  "upakovka_vosproizvodima": "две независимых упаковки дали один sha256",
+  "opublikovan": "protocol/daemon/kernel-cache/sm_120/"
+ },
+ "proba": {
+  "ref_hash": "097293ab113371537180fc5d94f754419ac7e04cf4165b6d255b689228594a07",
+  "texts": 34,
+  "numbers": 3948,
+  "limit_micro": 0,
+  "opublikovan": "protocol/daemon/probe/probe-v2-sm120.json"
+ },
+ "sborka": {
+  "karta": "RTX 5090, драйвер 615.71.09, 32 ГБ",
+  "kesh": "пустой, ~/.cache/vllm снесён перед запуском"
+ },
+ "proverka": {
+  "karta": "RTX 5090 другой машины, драйвер 580.159.03",
+  "kesh": "канонический архив, поставлен ДО первого запуска",
+  "peresborok_yader": 0,
+  "texts": 334,
+  "iz_nih": "34 текста пробы и 300 текстов корпуса",
+  "bitwise_identical": 334,
+  "worst_divergence_micro": 0
+ },
+ "mezhdu_klassami": [
+  {
+   "pair": "Blackwell RTX 5090 против Ada RTX 4090",
+   "texts": 334,
+   "bitwise_identical": 0,
+   "mean_micro": 16044,
+   "worst_micro": 32068
+  },
+  {
+   "pair": "Blackwell RTX 5090 против Ampere RTX 3090",
+   "texts": 334,
+   "bitwise_identical": 0,
+   "mean_micro": 14560,
+   "worst_micro": 27252
+  }
+ ],
+ "vyvod": "Внутри класса побитовое равенство полное, между классами его нет вовсе. Каждому классу нужен свой кеш и свой эталон — подтверждено на третьем классе независимо.",
+ "razvyornuto": {
+  "chain": "axiome-1",
+  "code_id": 339,
+  "contract": "axm1k2v4cjqfl5mqjutnyg5g4cgtatvj835p2sen8myefy40h4pv3ttscnqtwg",
+  "height": 14706168,
+  "gas": "210421 из 450000",
+  "cost_axm": 0.45,
+  "sverka": "16 полей настроек прочитаны из цепочки запросом {\"config\":{}} и сошлись с листом instantiate-sm120.json"
+ }
+}
