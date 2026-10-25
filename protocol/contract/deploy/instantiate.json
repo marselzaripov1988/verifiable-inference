@@ -50,7 +50,7 @@
  },
  "stake_denom": "uaxm",
  "min_stake": "30400000000",
- "verifier_fee_bps": 970,
+ "verifier_fee_bps": 485,
  "forfeit": {
   "to_address": "axm1232gmxu2pf4rz95re4e3da8dxdaj7pfyhn8hmu"
  }
