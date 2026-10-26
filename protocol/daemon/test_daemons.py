@@ -167,6 +167,7 @@ def main():
     test_checker_needs_probe()
     test_delivery()
     test_sroki_v_demonah()
+    test_server_nedostupen()
 
     print()
     if fails:
@@ -736,6 +737,69 @@ def test_sroki_v_demonah():
         ok(True, "неразборчивое время — отказ, а не догадка")
     finally:
         _ur.urlopen = saved
+
+
+def test_server_nedostupen():
+    """Недоступный сервер — ОТКАЗ, а не трассировка.
+
+    Случай обычный: сервер ещё не поднялся после перезапуска, слушает
+    другой порт, упал под нагрузкой. Демон запускают из сценария, и
+    трассировка там не говорит ни адреса, ни что делать — а код возврата
+    при падении и при отказе одинаков, так что сценарий не отличит
+    «узла нет» от «узел жульничает».
+    """
+    import urllib.error
+
+    import checker
+    import conformance
+    import executor
+    import vllm_client as vllm
+
+    print("### что считается недоступностью")
+    # HTTPError и URLError — подклассы OSError, поэтому перечислять их
+    # отдельно не нужно; а разбор ответа в этот набор НЕ входит нарочно.
+    ok(issubclass(urllib.error.HTTPError, OSError), "HTTPError это OSError")
+    ok(not isinstance(KeyError("choices"), vllm.NODE_FAILURES),
+       "KeyError на разборе ответа недоступностью НЕ считается: это своя "
+       "ошибка, и прятать её нельзя")
+    ok(isinstance(vllm.ScoringFailed("x"), vllm.NODE_FAILURES),
+       "исчерпанные попытки оценки — тоже отказ узла")
+
+    print("### в отказе назван адрес, а не только код")
+    e = urllib.error.HTTPError("http://узел:8000/v1/completions", 503,
+                               "Service Unavailable", {}, None)
+    ok("http://узел:8000/v1/completions" in vllm.why(e) and "503" in vllm.why(e),
+       f"сказано, куда стучались и что ответили: {vllm.why(e)}")
+    e = urllib.error.URLError("отказ в подключении")
+    ok("не соединиться" in vllm.why(e), f"обрыв связи назван: {vllm.why(e)}")
+
+    print("### демоны отказывают, а не падают")
+    boom = lambda *a, **k: (_ for _ in ()).throw(
+        urllib.error.HTTPError("http://x/v1/completions", 503,
+                               "Service Unavailable", {}, None))
+    saved = (vllm.self_check_problems, vllm.generate, vllm.score)
+    vllm.self_check_problems = boom
+    try:
+        ok(executor.run("http://x/v1", "m", 1, "p", 10, None) is None,
+           "исполнитель отказался, а не упал")
+        ok(checker.run("http://x/v1", "m", 1, "p", "a") is None,
+           "проверяющий отказался, а не упал")
+    finally:
+        vllm.self_check_problems = saved[0]
+
+    print("### и когда сервер умер ПОСЛЕ самопроверки")
+    # Так бывает чаще всего: самопроверка прошла, а на длинном тексте
+    # сервер отвалился. Этот случай раньше тоже давал трассировку.
+    vllm.self_check_problems = lambda *a, **k: []
+    vllm.generate = boom
+    vllm.score = boom
+    try:
+        ok(executor.run("http://x/v1", "m", 1, "p", 10, None) is None,
+           "исполнитель отказался на порождении")
+        ok(checker.run("http://x/v1", "m", 1, "p", "a") is None,
+           "проверяющий отказался на оценке")
+    finally:
+        (vllm.self_check_problems, vllm.generate, vllm.score) = saved
 
 
 if __name__ == "__main__":

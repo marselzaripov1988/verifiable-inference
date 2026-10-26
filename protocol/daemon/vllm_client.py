@@ -80,6 +80,35 @@ class VersionUnknown(Exception):
     """Версию сервера определить не удалось."""
 
 
+#: Что считать «узел не отвечает или отвечает отказом».
+#:
+#: Собрано в одном месте, чтобы каждый демон не перечислял это по-своему
+#: и не ловил лишнего. `HTTPError` и `URLError` — подклассы `OSError`,
+#: поэтому одного `OSError` хватает и на отказ соединения, и на таймаут,
+#: и на ответ с кодом ошибки.
+#:
+#: Разбор ответа сюда НЕ входит нарочно: `KeyError` на `choices` означает,
+#: что сервер ответил не тем, и ловить его вместе с обрывом связи значило
+#: бы прятать ошибку в своём коде под «узел недоступен».
+NODE_FAILURES = (OSError, ScoringFailed, VersionUnknown)
+
+
+def why(e):
+    """Почему узел негоден — одной строкой, с адресом.
+
+    Нужно затем, что голый `HTTPError` печатается как
+    «HTTP Error 503: Service Unavailable» и не говорит, КУДА демон
+    стучался; на узле с двумя серверами это первый вопрос.
+    """
+    if isinstance(e, urllib.error.HTTPError):
+        return f"{e.url} ответил {e.code} {e.reason}"
+    if isinstance(e, urllib.error.URLError):
+        return f"не соединиться: {e.reason}"
+    if isinstance(e, OSError):
+        return f"связи нет: {e}"
+    return str(e)
+
+
 def server_version(base, timeout=15):
     """Какая версия vLLM РЕАЛЬНО запущена.
 

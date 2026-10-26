@@ -144,7 +144,16 @@ def run(base, model, params=None, dtype="bfloat16", probe_path=PROBE_PATH):
             return None
     # Узел, не повторяющий сам себя, пробу проходить не должен: его
     # собственные числа ничего не значат.
-    for p in vllm.self_check_problems(base, model):
+    #
+    # Недоступный сервер — отказ, а не трассировка: пробу гоняют до
+    # первого задания, часто сразу после запуска сервера, то есть ровно
+    # тогда, когда он ещё может не отвечать.
+    try:
+        problems = vllm.self_check_problems(base, model)
+    except vllm.NODE_FAILURES as e:
+        print(f"ОТКАЗ: узел не отвечает: {vllm.why(e)}", file=sys.stderr)
+        return None
+    for p in problems:
         print(f"ОТКАЗ: {p}", file=sys.stderr)
         return None
 
@@ -154,7 +163,13 @@ def run(base, model, params=None, dtype="bfloat16", probe_path=PROBE_PATH):
 
     mine = []
     for i, text in enumerate(probe["texts"]):
-        v = canon.require_nonempty(canon.to_micro(vllm.score(base, model, text)))
+        try:
+            scored = vllm.score(base, model, text)
+        except vllm.NODE_FAILURES as e:
+            print(f"ОТКАЗ: на тексте {i} узел не отвечает: {vllm.why(e)}",
+                  file=sys.stderr)
+            return None
+        v = canon.require_nonempty(canon.to_micro(scored))
         if len(v) != lens[i]:
             # Оценивается готовый текст, обрываться ему негде. Другая
             # длина значит, что оценивалось не то: другой токенизатор,

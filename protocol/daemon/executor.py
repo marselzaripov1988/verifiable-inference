@@ -99,14 +99,28 @@ def run(base, model, job_id, prompt, max_tokens, out_vector,
             for b in bad:
                 print(f"ОТКАЗ: {b}", file=sys.stderr)
             return None
-    for p in vllm.self_check_problems(base, model):
+    # Недоступный сервер — ОТКАЗ, а не трассировка. Трассировка здесь не
+    # просто неопрятна: демон запускают из сценария, и по ней не видно
+    # ни адреса, ни того, что делать. А случай обычный — сервер ещё не
+    # поднялся после перезапуска или слушает другой порт.
+    try:
+        problems = vllm.self_check_problems(base, model)
+    except vllm.NODE_FAILURES as e:
+        print(f"ОТКАЗ: узел не отвечает: {vllm.why(e)}", file=sys.stderr)
+        return None
+    for p in problems:
         print(f"ОТКАЗ: {p}", file=sys.stderr)
         return None
 
-    answer, tokens = vllm.generate(base, model, prompt, max_tokens)
-    # Оценивается ЦЕЛИКОМ prompt+answer, как в замерах: проверяющий будет
-    # оценивать то же самое, и расходиться в составе текста нельзя.
-    logprobs = vllm.score(base, model, prompt + answer)
+    try:
+        answer, tokens = vllm.generate(base, model, prompt, max_tokens)
+        # Оценивается ЦЕЛИКОМ prompt+answer, как в замерах: проверяющий
+        # будет оценивать то же самое, и расходиться в составе текста
+        # нельзя.
+        logprobs = vllm.score(base, model, prompt + answer)
+    except vllm.NODE_FAILURES as e:
+        print(f"ОТКАЗ: узел не отвечает: {vllm.why(e)}", file=sys.stderr)
+        return None
     v = canon.require_nonempty(canon.to_micro(logprobs))
 
     if out_vector:

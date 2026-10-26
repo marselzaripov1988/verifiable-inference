@@ -139,11 +139,23 @@ def run(base, model, job_id, prompt, answer, producer_vector=None,
             for b in bad:
                 print(f"ОТКАЗ: {b}", file=sys.stderr)
             return None
-    for p in vllm.self_check_problems(base, model):
+    # Недоступный сервер — отказ, а не трассировка: см. executor.py.
+    try:
+        problems = vllm.self_check_problems(base, model)
+    except vllm.NODE_FAILURES as e:
+        print(f"ОТКАЗ: узел проверяющего не отвечает: {vllm.why(e)}",
+              file=sys.stderr)
+        return None
+    for p in problems:
         print(f"ОТКАЗ: узел проверяющего негоден: {p}", file=sys.stderr)
         return None
 
-    logprobs = vllm.score(base, model, prompt + answer)
+    try:
+        logprobs = vllm.score(base, model, prompt + answer)
+    except vllm.NODE_FAILURES as e:
+        print(f"ОТКАЗ: узел проверяющего не отвечает: {vllm.why(e)}",
+              file=sys.stderr)
+        return None
     mine = canon.require_nonempty(canon.to_micro(logprobs))
     # Расхождение — свидетельство, а не вердикт. Без вектора исполнителя
     # его не посчитать, и это не мешает: контракт сравнивает хэши.
