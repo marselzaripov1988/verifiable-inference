@@ -166,6 +166,7 @@ def main():
     test_shipped_probe()
     test_checker_needs_probe()
     test_delivery()
+    test_sroki_v_demonah()
 
     print()
     if fails:
@@ -583,5 +584,161 @@ def test_checker_needs_probe():
     ok(r is not None, "с действующей пробой работает")
 
 
+def test_sroki_v_demonah():
+    """Сроки заданий: демоны их учитывают.
+
+    Сроки появились в контракте 26 октября. Демонам они нужны не для
+    порядка: исполнитель, начавший работу по заданию с вышедшим сроком,
+    платит за инференс и остаётся без оплаты — задание отберут.
+    """
+    import chain
+    import checker
+    import deadlines
+    import executor
+
+    P = chain.Params(
+        checks_required=2, pinned_model="m", pinned_runtime="r",
+        pinned_dtype="bfloat16", pinned_arch="sm_89", kernel_cache_hash="k",
+        settlement={"native": "uaxm"}, stake_denom="uaxm",
+        conformance_limit_micro=0, conformance_ref_hash="x" * 64,
+        conformance_lens=(3,), conformance_version=1,
+        claim_ttl_seconds=600, check_ttl_seconds=3600)
+
+    print("### граница срока совпадает с контрактной")
+    j = {"state": "claimed", "claimed_at": 1000}
+    ok(chain.deadline_of(j, P, 1500)["left"] == 100, "остаток считается")
+    # В контракте условие строгое: `passed <= ttl` — отказ. Значит ровно
+    # на границе срок ЕЩЁ не вышел, и демон обязан считать так же,
+    # иначе он отказался бы от задания, которое контракт ещё держит.
+    ok(not chain.deadline_of(j, P, 1600)["expired"],
+       "ровно на границе срок не вышел — как в контракте")
+    ok(chain.deadline_of(j, P, 1601)["expired"], "секундой позже — вышел")
+
+    print("### без отметки времени срок считается давно вышедшим")
+    # Записи до появления сроков отметки не имеют. В контракте такие
+    # отбираемы немедленно (claimed_at.unwrap_or(0)), и демон не должен
+    # считать их вечно живыми.
+    ok(chain.deadline_of({"state": "claimed"}, P, 10_000)["expired"],
+       "задание без отметки отбираемо")
+
+    print("### у невзятого и закрытого срока нет")
+    for st in ("open", "settled"):
+        d = chain.deadline_of({"state": st}, P, 10_000)
+        ok(d["left"] is None and not d["expired"], f"{st}: сроком не ограничено")
+
+    print("### исполнитель отказывается от задания с вышедшим сроком")
+    bad = executor.deadline_problems({"state": "claimed", "claimed_at": 0}, P, 10_000)
+    ok(bad and "отберёт" in bad[0], "сказано, что работа пропадёт")
+    ok(not executor.deadline_problems({"state": "claimed", "claimed_at": 9_000},
+                                      P, 9_100),
+       "по живому заданию работа идёт")
+    print("### и от задания, которое не взято им")
+    bad = executor.deadline_problems({"state": "open"}, P, 100)
+    ok(bad and "claimed" in bad[0], "ответ принимается только по взятому")
+    print("### запас узла уважается")
+    bad = executor.deadline_problems({"state": "claimed", "claimed_at": 9_000},
+                                     P, 9_500, min_left=200)
+    ok(bad and "не успеть" in bad[0], "осталось 100 с при запросе 200 — отказ")
+
+    print("### проверяющий предупреждает, но не отказывается")
+    # Разница с исполнителем не в мягкости: пока никто не вызвал
+    # expire_checks, сданная проверка засчитывается и может добрать
+    # кворум, то есть довести задание до вердикта. Запрет такой работы
+    # запрещал бы закрывать задания.
+    expired, note = checker.deadline_note(
+        {"state": "answered", "answered_at": 0}, P, 10_000)
+    ok(expired is True, "срок распознан как вышедший")
+    ok("засчитывается" in note, "сказано, что работа ещё может оплатиться")
+    expired, note = checker.deadline_note(
+        {"state": "answered", "answered_at": 9_000}, P, 9_100)
+    ok(expired is False and "осталось" in note, "по живому заданию — остаток")
+
+    print("### сообщения, которые пора отправить")
+    ok(chain.due_message(7, {"state": "claimed", "claimed_at": 0}, P, 10_000)
+       == {"release_job": {"job_id": 7}}, "брошенное задание возвращается")
+    ok(chain.due_message(7, {"state": "answered", "answered_at": 0}, P,
+                         10_000, checks=1)
+       == {"expire_checks": {"job_id": 7}}, "несобранные проверки закрываются")
+    # При собранном кворуме закрывать надо вердиктом: контракт отвергнет
+    # закрытие сроком (ChecksEnough), и предлагать его нельзя.
+    ok(chain.due_message(7, {"state": "answered", "answered_at": 0}, P,
+                         10_000, checks=2) is None,
+       "при собранном кворуме сроком не закрывают")
+    # Без числа проверок предлагать нечего: вызов мог бы быть отвергнут.
+    ok(chain.due_message(7, {"state": "answered", "answered_at": 0}, P,
+                         10_000, checks=None) is None,
+       "без числа проверок сроком не закрывают")
+    ok(chain.due_message(7, {"state": "claimed", "claimed_at": 9_000}, P, 9_100)
+       is None, "по живому заданию закрывать нечего")
+
+    print("### обход заданий")
+    jobs = {
+        1: {"state": "settled"},
+        2: {"state": "claimed", "claimed_at": 0},
+        3: {"state": "answered", "answered_at": 0},
+        4: {"state": "open"},
+        5: {"state": "answered", "answered_at": 9_000},
+    }
+    def fake(rest, contract, q, timeout=20):
+        if "job" in q:
+            jid = q["job"]["job_id"]
+            if jid not in jobs:
+                raise chain.ChainUnavailable("нет такого задания")
+            return jobs[jid]
+        if "checks" in q:
+            return {"checks": [{"checker": "c0"}], "mismatched": 0}
+        raise AssertionError(q)
+    saved = chain.query_smart
+    chain.query_smart = fake
+    try:
+        rows = deadlines.scan("http://rest", "axm1c", P, 10_000, range(1, 9))
+    finally:
+        chain.query_smart = saved
+    ok(len(rows) == 5, f"найдено 5 заданий, не больше (вышло {len(rows)})")
+    due = [r["msg"] for r in rows if r["msg"]]
+    ok(due == [{"release_job": {"job_id": 2}},
+               {"expire_checks": {"job_id": 3}}],
+       f"пора закрыть ровно два, и нужными сообщениями (вышло {due})")
+    # Пятое задание свежее: срок у него не вышел, и в выдачу не попало.
+    ok(not [r for r in rows if r["job_id"] == 5 and r["expired"]],
+       "свежее задание не закрывается")
+
+    print("### время берётся у цепочки, а не с местных часов")
+    # Часы арендованной машины уходят, а срок проверяет контракт по
+    # времени блока. Разбор формата проверяется прямо: наносекунды
+    # отбрасываются, Z — зона UTC.
+    import io as _io
+    import json as _json
+    import urllib.request as _ur
+    class R:
+        def __init__(self, t): self.t = t
+        def read(self): return _json.dumps(
+            {"block": {"header": {"time": self.t}}}).encode()
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    saved = _ur.urlopen
+    _ur.urlopen = lambda url, timeout=20: R("2026-10-26T12:00:00.123456789Z")
+    try:
+        t = chain.chain_time("http://rest")
+    finally:
+        _ur.urlopen = saved
+    # Ожидаемое считается из даты, а не вписано числом: число я один раз
+    # уже написал неверное, и тест поймал разбор вместо моей ошибки.
+    import datetime as _dt
+    want = int(_dt.datetime(2026, 10, 26, 12, 0, 0,
+                            tzinfo=_dt.timezone.utc).timestamp())
+    ok(t == want, f"время блока разобрано (вышло {t}, ждали {want})")
+    _ur.urlopen = lambda url, timeout=20: R("не время")
+    try:
+        chain.chain_time("http://rest")
+        ok(False, "неразборчивое время должно отвергаться")
+    except chain.ChainUnavailable:
+        ok(True, "неразборчивое время — отказ, а не догадка")
+    finally:
+        _ur.urlopen = saved
+
+
 if __name__ == "__main__":
     raise SystemExit(main())
+
+

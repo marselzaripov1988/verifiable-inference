@@ -52,8 +52,47 @@ def preflight(base, params, model, dtype, record=None):
     return bad
 
 
+def deadline_problems(job, params, now, min_left=0):
+    """Стоит ли вообще начинать работу по этому заданию.
+
+    Инференс стоит денег и времени, а взятое задание отбирается по
+    истечении `claim_ttl_seconds` кем угодно. Начать работу по заданию,
+    срок которого вышел, — значит почти наверняка заплатить за инференс
+    и остаться без оплаты: `submit_answer` принимается только в
+    состоянии `Claimed`, а задание из него уже выбивают.
+
+    `min_left` — свой запас узла в секундах. Ноль означает «отказываюсь
+    только когда срок уже вышел»; узлу, которому на ответ нужно минуту,
+    разумнее поставить с запасом.
+    """
+    phase = str(job.get("state", "")).lower()
+    if phase != "claimed":
+        return [f"задание в состоянии {phase or '?'}, а не claimed: "
+                f"ответ принимается только по взятому"]
+    d = chain.deadline_of(job, params, now)
+    if d["expired"]:
+        return [f"срок взятого задания вышел {-d['left']} с назад: "
+                f"его отберёт кто угодно, работа пропадёт"]
+    if d["left"] < min_left:
+        return [f"до конца срока {d['left']} с, а узел просит запас "
+                f"{min_left} с: не успеть"]
+    return []
+
+
 def run(base, model, job_id, prompt, max_tokens, out_vector,
-        params=None, dtype="bfloat16", record=None):
+        params=None, dtype="bfloat16", record=None, job=None, now=None,
+        min_left=0):
+    # Срок — до всякой работы: отказ дешевле, чем оплаченный инференс по
+    # заданию, которое отберут.
+    if job is not None and params is not None and now is not None:
+        bad = deadline_problems(job, params, now, min_left)
+        if bad:
+            for b in bad:
+                print(f"ОТКАЗ: {b}", file=sys.stderr)
+            return None
+    elif params is not None:
+        print("ВНИМАНИЕ: срок задания не проверен — нужны --rest, "
+              "--contract и живая цепочка", file=sys.stderr)
     if params is not None:
         bad = preflight(base, params, model, dtype, record)
         if bad:
@@ -117,6 +156,10 @@ def main():
     p.add_argument("--contract", help="адрес контракта")
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--address", help="свой адрес: с ним сверяется состояние пробы")
+    p.add_argument("--min-time-left", type=int, default=0, metavar="СЕК",
+                   help="сколько секунд срока должно остаться, чтобы браться "
+                        "за работу. По умолчанию 0: отказ только когда срок "
+                        "уже вышел")
     a = p.parse_args()
 
     params = None
@@ -137,8 +180,26 @@ def main():
     record = None
     if params is not None and a.address:
         record = chain.load_executor(a.rest, a.contract, a.address)
+
+    job = now = None
+    if a.rest and a.contract:
+        # Задание и время ЦЕПОЧКИ: по ним считается остаток срока.
+        # Местными часами мерить нельзя — срок проверяет контракт по
+        # времени блока, а часы арендованной машины уходят запросто.
+        try:
+            job = chain.load_job(a.rest, a.contract, a.job_id)
+            now = chain.chain_time(a.rest)
+        except chain.ChainUnavailable as e:
+            print(f"ОТКАЗ: срок задания не проверить: {e}", file=sys.stderr)
+            return 1
+        d = chain.deadline_of(job, params, now)
+        if d["left"] is not None:
+            print(f"срок: осталось {d['left']} с из "
+                  f"{params.claim_ttl_seconds}", file=sys.stderr)
+
     r = run(a.base_url, a.model, a.job_id, a.prompt, a.max_tokens, a.out_vector,
-            params=params, dtype=a.dtype, record=record)
+            params=params, dtype=a.dtype, record=record, job=job, now=now,
+            min_left=a.min_time_left)
     if r is None:
         return 1
     print(f"ответ: {len(r['answer'])} символов, вектор {r['vector_len']} элементов",

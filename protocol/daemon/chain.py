@@ -18,6 +18,7 @@
 """
 
 import base64
+import datetime
 import json
 import urllib.request
 from dataclasses import dataclass
@@ -50,10 +51,10 @@ class Params:
     conformance_lens: tuple
     # --- сроки заданий ---
     #: Сколько секунд исполнитель вправе держать взятое задание и сколько
-    #: собираются проверки. Читаются, но демоны на них пока НЕ смотрят:
-    #: ни отказа брать задание, которое не успеть, ни напоминания
-    #: проверяющему тут ещё нет. Значения — чтобы о сроке было видно из
-    #: цепочки, а не из переписки.
+    #: собираются проверки. Демоны их УЧИТЫВАЮТ: исполнитель отказывается
+    #: начинать работу по заданию с вышедшим сроком (инференс оплачен, а
+    #: задание отберут), проверяющий предупреждает о риске, а
+    #: deadlines.py печатает сообщения, которые пора отправить.
     claim_ttl_seconds: int
     check_ttl_seconds: int
     conformance_version: int
@@ -257,3 +258,102 @@ def normalize_runtime(version):
     """
     v = version.strip()
     return v if v.startswith("vllm-") else f"vllm-{v}"
+
+
+# --- сроки заданий --------------------------------------------------------
+#
+# Сроки появились в контракте 26 октября: взятое и брошенное задание
+# теперь отбирается, а сданный ответ без собранных проверок закрывается
+# возвратом заказчику. Демонам это надо УЧИТЫВАТЬ, иначе узел оплачивает
+# инференс по заданию, которое у него вот-вот отберут.
+
+#: Состояния задания, у которых есть срок, и из чего он считается.
+PHASE_DEADLINE = {
+    "claimed": ("claimed_at", "claim_ttl_seconds"),
+    "answered": ("answered_at", "check_ttl_seconds"),
+}
+
+
+def chain_time(rest, timeout=20):
+    """Время ЦЕПОЧКИ в секундах, а не местные часы.
+
+    Местными часами считать нельзя: срок проверяет контракт по времени
+    блока, и расхождение часов узла с цепочкой означало бы, что демон
+    считает задание живым, когда оно уже отбираемо, или наоборот. На
+    арендованной машине часы запросто уходят.
+    """
+    url = f"{rest.rstrip('/')}/cosmos/base/tendermint/v1beta1/blocks/latest"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            t = json.loads(r.read())["block"]["header"]["time"]
+    except Exception as e:
+        raise ChainUnavailable(f"{url}: {e}") from e
+    # Формат RFC3339 с наносекундами: 2026-10-26T12:34:56.789012345Z.
+    # Доли секунды отбрасываются — сроки измеряются секундами.
+    head = t.split(".")[0].rstrip("Z")
+    try:
+        return int(datetime.datetime.strptime(
+            head, "%Y-%m-%dT%H:%M:%S").replace(
+                tzinfo=datetime.timezone.utc).timestamp())
+    except ValueError as e:
+        raise ChainUnavailable(f"время блока не разобрано: {t!r}: {e}") from e
+
+
+def deadline_of(job, params, now):
+    """Срок задания: когда истекает и сколько осталось.
+
+    Возвращает dict с полями `phase`, `deadline`, `left`, `expired`. Для
+    состояний без срока (`open`, `settled`) — `phase` и None в остальном:
+    невзятое задание никто не отбирает, закрытое уже закрыто.
+
+    Отсутствие отметки времени считается «срок давно вышел» — так же,
+    как в контракте: такие записи сделаны до появления сроков, и
+    застряли именно они.
+    """
+    phase = str(job.get("state", "")).lower()
+    pair = PHASE_DEADLINE.get(phase)
+    if pair is None:
+        return {"phase": phase, "deadline": None, "left": None, "expired": False}
+    at_field, ttl_field = pair
+    ttl = int(getattr(params, ttl_field))
+    at = job.get(at_field)
+    at = int(at) if at is not None else 0
+    deadline = at + ttl
+    return {
+        "phase": phase,
+        "deadline": deadline,
+        "left": deadline - int(now),
+        # Строго больше, как в контракте: ровно на границе срок ЕЩЁ не
+        # вышел, и задание не отобрать.
+        "expired": int(now) > deadline,
+    }
+
+
+def due_message(job_id, job, params, now, checks=None):
+    """Сообщение, которое по этому заданию УЖЕ пора отправить.
+
+    Нужно затем, что сроки в контракте никто не исполняет сам: и
+    `release_job`, и `expire_checks` вызывает кто угодно, но вызвать их
+    должен кто-то. Пока этого не делает ни один узел, механизм записан,
+    но не работает.
+
+    `checks` — сколько проверок уже сдано; без него `expire_checks` не
+    предлагается, потому что при собранном кворуме закрывать надо
+    вердиктом, и контракт такой вызов отвергнет.
+    """
+    d = deadline_of(job, params, now)
+    if not d["expired"]:
+        return None
+    if d["phase"] == "claimed":
+        return {"release_job": {"job_id": int(job_id)}}
+    if d["phase"] == "answered":
+        if checks is None or int(checks) >= int(params.checks_required):
+            return None
+        return {"expire_checks": {"job_id": int(job_id)}}
+    return None
+
+
+def load_checks(rest, contract, job_id):
+    """Сколько проверок сдано по заданию."""
+    d = query_smart(rest, contract, {"checks": {"job_id": int(job_id)}})
+    return len(d.get("checks") or [])

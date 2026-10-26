@@ -62,9 +62,35 @@ def load_bundle(src):
         return json.load(f)
 
 
+def deadline_note(job, params, now):
+    """Что сказать проверяющему про срок сбора проверок.
+
+    Отказа здесь по умолчанию НЕТ, и это разница с исполнителем. У
+    исполнителя истёкший срок означает почти верную потерю работы:
+    задание выбьют из `Claimed`, и ответ принять будет некуда. У
+    проверяющего — нет: пока никто не вызвал `expire_checks`, сданная
+    проверка засчитывается, а если она добирает кворум, задание
+    закрывается вердиктом и платят всем как обычно. Запрещать такую
+    работу значило бы запрещать доводить задания до вердикта.
+
+    Но и молчать нельзя: риск реален — кто угодно может закрыть задание
+    сроком, и тогда работа не оплачена. Поэтому предупреждение с числом,
+    а отказ — по требованию узла (`--skip-expired`).
+    """
+    d = chain.deadline_of(job, params, now)
+    if d["left"] is None:
+        return None, f"задание в состоянии {d['phase'] or '?'}: сроком не ограничено"
+    if d["expired"]:
+        return True, (f"срок сбора проверок вышел {-d['left']} с назад: "
+                      f"работа может не оплатиться — задание закроют "
+                      f"возвратом заказчику. Но пока не закрыли, проверка "
+                      f"засчитывается и может добрать кворум")
+    return False, f"срок сбора проверок: осталось {d['left']} с из {params.check_ttl_seconds}"
+
+
 def run(base, model, job_id, prompt, answer, producer_vector=None,
         producer_hash=None, params=None, dtype="bfloat16", record=None,
-        job=None):
+        job=None, now=None, skip_expired=False):
     # Сверка ТЕКСТА с цепочкой — до всякой работы и без исключений:
     # подменённый текст даёт несовпадение хэшей, а это обвинение честного.
     if job is not None:
@@ -76,6 +102,17 @@ def run(base, model, job_id, prompt, answer, producer_vector=None,
     else:
         print("ВНИМАНИЕ: текст не сверен с цепочкой — только для проверки "
               "самого демона, не для сети", file=sys.stderr)
+
+    # Срок сбора проверок: предупреждение, а не отказ — см.
+    # deadline_note. Отказ только если узел сам этого потребовал.
+    if job is not None and params is not None and now is not None:
+        expired, note = deadline_note(job, params, now)
+        if note:
+            print(("ВНИМАНИЕ: " if expired else "") + note, file=sys.stderr)
+        if expired and skip_expired:
+            print("ОТКАЗ: срок вышел, а узел просил такие не брать",
+                  file=sys.stderr)
+            return None
 
     # Вектор исполнителя необязателен: в вердикте он не участвует. Но
     # если дан, обязан сходиться со своим обязательством — иначе
@@ -144,6 +181,10 @@ def main():
     p.add_argument("--contract", help="адрес контракта")
     p.add_argument("--dtype", default="bfloat16")
     p.add_argument("--address", help="свой адрес: с ним сверяется состояние пробы")
+    p.add_argument("--skip-expired", action="store_true",
+                   help="не браться за задания, у которых срок сбора проверок "
+                        "уже вышел. По умолчанию демон за них берётся, но "
+                        "предупреждает: проверка ещё может добрать кворум")
     a = p.parse_args()
 
     params = None
@@ -178,9 +219,19 @@ def main():
             print(f"ОТКАЗ: задание из цепочки не получено: {e}",
                   file=sys.stderr)
             return 1
+    now = None
+    if a.rest and params is not None:
+        # Время ЦЕПОЧКИ, не местные часы: срок считает контракт по
+        # времени блока.
+        try:
+            now = chain.chain_time(a.rest)
+        except chain.ChainUnavailable as e:
+            print(f"ВНИМАНИЕ: время цепочки не получено, срок не проверен: {e}",
+                  file=sys.stderr)
     r = run(a.base_url, a.model, a.job_id, prompt, answer, pv,
             a.producer_hash or (job or {}).get("logprobs_hash"),
-            params=params, dtype=a.dtype, record=record, job=job)
+            params=params, dtype=a.dtype, record=record, job=job, now=now,
+            skip_expired=a.skip_expired)
     if r is None:
         return 1
     # Вердикт выносит контракт равенством хэшей, а не демон порогом.
