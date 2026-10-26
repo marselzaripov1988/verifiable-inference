@@ -1,0 +1,37 @@
+
+===== 1. поднять цепочку =====
+высота 2
+
+===== 2. загрузить ОБА кода =====
+старый код (2461a00b…, он же 339 в axiome-1): code_id=1
+новый код (68562c30…): code_id=2
+  старый data_hash: 2461a00b3abbc3a8659ca9a0209a87a135df942852a5af084bb630d1ec5758a6
+  новый  data_hash: 68562c305dbec7950b95aeb6df281491454006e5ce3e218f3687a8c5b45d7000
+
+===== 3. развернуть СТАРЫМ кодом, как в axiome-1 =====
+контракт: wasm14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9s0phg4d
+  аттестор в настройках: есть (wasm14sgm2r4lnmhxcpe4ucsn4cjklg0j6zsnfeypt0)
+
+===== 4. перенос ВПЕРЁД, на новый код =====
+  from: 1
+  to: 2
+  changed: attestor_dropped
+  аттестора в настройках больше нет
+  класс sm_89, предел 0, залог 30400000000, доля 485, проверок 2, версия пробы 1
+  code_id контракта теперь: 2
+
+===== 5. перенос НАЗАД, на тот самый старый code_id =====
+  код ошибки: 11
+  журнал: failed to execute message; message index: 0: Error calling the VM: Error resolving Wasm function: Could not get export: Missing export migrate: migrate wasm contract failed
+
+===== 6. а если загрузить тот же старый код ещё раз, под новым номером? =====
+тот же код, code_id=3
+  код ошибки: 11
+  журнал: failed to execute message; message index: 0: Error calling the VM: Error resolving Wasm function: Could not get export: Missing export migrate: migrate wasm contract failed
+
+===== 7. контракт после двух отказов жив и на новом коде =====
+  code_id 2, аттестор: нет
+
+===== ИТОГ =====
+вперёд — проходит, назад на код без migrate — нет, и это свойство КОДА,
+а не номера: тот же код под другим номером отказал так же.
