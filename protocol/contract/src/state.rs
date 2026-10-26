@@ -107,6 +107,34 @@ pub struct Config {
     /// проба свидетельствует о соответствии КОНКРЕТНОЙ настройке, и
     /// после её смены свидетельство пустое.
     pub conformance_version: u64,
+    /// Сколько секунд исполнитель вправе держать взятое задание.
+    ///
+    /// Нужен затем, что без срока взятое и брошенное задание висит
+    /// ВЕЧНО: деньги заказчика заперты в контракте, а исполнитель не
+    /// может забрать залог — забрать его при незакрытом задании нельзя.
+    /// Найдено 26 октября при разборе `SetSuspended`: права отстранять
+    /// узел этого не решали вовсе, отстранение не освобождает задание.
+    ///
+    /// По истечении срока задание возвращает в `Open` КТО УГОДНО, а не
+    /// админ: иначе срок был бы тем же усмотрением, только с таймером.
+    /// Наказания нет — брошенное задание не доказывает подлога, узел мог
+    /// и упасть; отмечается счётчиком `abandoned`.
+    pub claim_ttl_seconds: u64,
+    /// Сколько секунд собираются проверки по сданному ответу.
+    ///
+    /// Если их пришло меньше `checks_required`, вердикта нет и быть не
+    /// может: он выносится равенством хэшей, а сравнивать не с чем. Без
+    /// срока такое задание не закрывается никогда — а случай не
+    /// умозрительный: проверок нужно две, и в классе на старте бывает
+    /// три узла всего.
+    ///
+    /// По истечении деньги идут ЗАКАЗЧИКУ: нет проверки — нет оплаты.
+    /// Исполнитель работал зря, но платить за неподтверждённый ответ
+    /// заказчик не обязан, иначе узел, умеющий отбить проверяющих,
+    /// получал бы плату за непроверенное — ровно тот подлог, против
+    /// которого протокол. Пришедшим проверяющим их доля выплачивается:
+    /// работу они сделали.
+    pub check_ttl_seconds: u64,
     /// Чем идёт расчёт. Настройкой, а не константой в коде: BARTR на
     /// Axiome это CW20, шлюз этапа 1 собирает родной AXM, а при
     /// появлении IBC расчёт переедет на ваучер — то есть на третью
@@ -239,6 +267,13 @@ pub struct Executor {
     pub status: ExecutorStatus,
     pub jobs_done: u64,
     pub convictions: u64,
+    /// Сколько взятых заданий у него отобрали по истечении срока.
+    ///
+    /// Не наказание, а запись: брошенное задание не доказывает подлога.
+    /// Но видно это должно быть всем, иначе узел, берущий задания и
+    /// молчащий, ничем не отличается от исправного.
+    #[serde(default)]
+    pub abandoned: u64,
     /// Внесённый залог в stake_denom. Активным исполнитель становится
     /// только при залоге не ниже min_stake.
     pub stake: Uint128,
@@ -306,6 +341,17 @@ pub struct Job {
     pub fee_total: Uint128,
     /// Выплачено ли по заданию. Защита от двойной выплаты.
     pub paid: bool,
+    /// Когда задание взято, в секундах цепочки. Отсюда считается
+    /// `claim_ttl_seconds`.
+    ///
+    /// `serde(default)` затем, что записи, сделанные до появления сроков,
+    /// этого поля не содержат. Такие читаются как `None`, и `None`
+    /// означает «срок давно вышел»: именно они и есть застрявшие.
+    #[serde(default)]
+    pub claimed_at: Option<u64>,
+    /// Когда сдан ответ. Отсюда считается `check_ttl_seconds`.
+    #[serde(default)]
+    pub answered_at: Option<u64>,
 }
 
 #[cw_serde]
@@ -340,8 +386,8 @@ pub const CHECKS: Map<(u64, &Addr), Check> = Map::new("checks");
 /// недопустимо.
 pub const STATE_VERSION: Item<u16> = Item::new("state_version");
 
-/// Нынешняя форма. 1 — с `attestor`, 2 — без него.
-pub const CURRENT_VERSION: u16 = 2;
+/// Нынешняя форма. 1 — с `attestor`, 2 — без него, 3 — со сроками.
+pub const CURRENT_VERSION: u16 = 3;
 
 /// Настройки формы 1: с `attestor`. Нужна только переносчику.
 ///
@@ -369,11 +415,64 @@ pub struct ConfigV1 {
     pub forfeit: Forfeit,
 }
 
-impl ConfigV1 {
-    /// Перенос в нынешнюю форму: `attestor` отбрасывается, остальное
-    /// переносится как есть.
-    pub fn migrate(self) -> Config {
+/// Настройки формы 2: без `attestor`, но и без сроков. Это то, что
+/// лежит у трёх развёрнутых экземпляров с 26 октября.
+///
+/// Нынешней структурой эти байты НЕ читаются: в ней появились
+/// `claim_ttl_seconds` и `check_ttl_seconds`, а пропущенные поля serde
+/// не прощает. Дать им `serde(default)` было бы хуже молчаливого отказа:
+/// нулевой срок означает «задание можно отобрать немедленно».
+#[derive(serde::Deserialize)]
+pub struct ConfigV2 {
+    pub admin: Addr,
+    pub checks_required: u32,
+    pub pinned_model: String,
+    pub pinned_runtime: String,
+    pub pinned_dtype: String,
+    pub pinned_arch: String,
+    pub kernel_cache_hash: String,
+    pub conformance_limit_micro: Micro,
+    pub conformance_ref_hash: String,
+    pub conformance_lens: Vec<u32>,
+    pub conformance_version: u64,
+    pub settlement: Settlement,
+    pub stake_denom: String,
+    pub min_stake: Uint128,
+    pub verifier_fee_bps: u16,
+    pub forfeit: Forfeit,
+}
+
+impl ConfigV2 {
+    /// Форма 2 -> 3: добавляются сроки. Значения приходят снаружи, из
+    /// переносчика, и не берутся из воздуха здесь.
+    pub fn to_v3(self, claim_ttl_seconds: u64, check_ttl_seconds: u64) -> Config {
         Config {
+            admin: self.admin,
+            checks_required: self.checks_required,
+            pinned_model: self.pinned_model,
+            pinned_runtime: self.pinned_runtime,
+            pinned_dtype: self.pinned_dtype,
+            pinned_arch: self.pinned_arch,
+            kernel_cache_hash: self.kernel_cache_hash,
+            conformance_limit_micro: self.conformance_limit_micro,
+            conformance_ref_hash: self.conformance_ref_hash,
+            conformance_lens: self.conformance_lens,
+            conformance_version: self.conformance_version,
+            claim_ttl_seconds,
+            check_ttl_seconds,
+            settlement: self.settlement,
+            stake_denom: self.stake_denom,
+            min_stake: self.min_stake,
+            verifier_fee_bps: self.verifier_fee_bps,
+            forfeit: self.forfeit,
+        }
+    }
+}
+
+impl ConfigV1 {
+    /// Форма 1 -> 2: `attestor` отбрасывается, остальное как есть.
+    pub fn to_v2(self) -> ConfigV2 {
+        ConfigV2 {
             admin: self.admin,
             checks_required: self.checks_required,
             pinned_model: self.pinned_model,

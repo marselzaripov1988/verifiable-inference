@@ -78,6 +78,10 @@ const CONF_LIMIT: u64 = 0;
 /// границы текстов обязаны быть именно двумя, иначе максимум по текстам
 /// не отличить от среднего по склейке.
 const PROBE_LENS: [u32; 2] = [3, 3];
+/// Сроки. Те же, что в листах развёртывания: 10 минут на ответ, час на
+/// сбор проверок.
+const CLAIM_TTL: u64 = 600;
+const CHECK_TTL: u64 = 3600;
 fn probe_ref() -> Vec<MicroLog> {
     vec![-500_000, -500_000, -500_000, -400_000, -400_000, -400_000]
 }
@@ -109,6 +113,8 @@ fn setup(deps: DepsMut) {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
+            claim_ttl_seconds: CLAIM_TTL,
+            check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Cw20(Addr::unchecked(CW20)),
             stake_denom: STAKE.into(),
             min_stake: Uint128::new(MIN_STAKE),
@@ -694,6 +700,8 @@ fn prava_razdeleny() {
             kernel_cache_hash: None,
             conformance_limit_micro: None,
             conformance_ref: None,
+            claim_ttl_seconds: None,
+            check_ttl_seconds: None,
             settlement: None,
             stake_denom: None,
             min_stake: None,
@@ -749,6 +757,8 @@ fn nol_proverok_zapreshchen() {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
+            claim_ttl_seconds: CLAIM_TTL,
+            check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Cw20(Addr::unchecked(CW20)),
             stake_denom: STAKE.into(),
             min_stake: Uint128::new(MIN_STAKE),
@@ -1054,6 +1064,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: None,
             forfeit: Some(Forfeit::ToAddress(Addr::unchecked("community_pool"))),
@@ -1094,6 +1105,7 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: Some(10_001), forfeit: None,
         }).unwrap_err();
@@ -1237,6 +1249,7 @@ fn smena_svyazki_obnulyaet_probu() {
             pinned_arch: None, kernel_cache_hash: None, pinned_model: None,
             pinned_runtime: Some("vllm-0.32.0".into()), pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
@@ -1261,6 +1274,7 @@ fn smena_etalona_obnulyaet_probu() {
                 ref_hash: commit_hash(&probe_foreign()),
                 lens: PROBE_LENS.to_vec(),
             }),
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
@@ -1287,6 +1301,7 @@ fn zapis_toy_zhe_svyazki_probu_ne_obnulyaet() {
                 ref_hash: commit_hash(&probe_ref()),
                 lens: PROBE_LENS.to_vec(),
             }),
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: Some(500), forfeit: None,
         }).unwrap();
@@ -1453,6 +1468,7 @@ fn pustoy_etalon_ne_prinimaetsya() {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: vec![],
+            claim_ttl_seconds: CLAIM_TTL, check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Cw20(Addr::unchecked(CW20)),
             stake_denom: STAKE.into(), min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS, forfeit: Forfeit::Burn,
@@ -1512,6 +1528,7 @@ fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
                 ref_hash: commit_hash(&probe_foreign()),
                 lens: PROBE_LENS.to_vec(),
             }),
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
@@ -1550,6 +1567,8 @@ fn setup_native(deps: DepsMut) {
             conformance_limit_micro: CONF_LIMIT,
             conformance_ref_hash: commit_hash(&probe_ref()),
             conformance_lens: PROBE_LENS.to_vec(),
+            claim_ttl_seconds: CLAIM_TTL,
+            check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Native(NATIVE.into()),
             stake_denom: STAKE.into(),
             min_stake: Uint128::new(MIN_STAKE),
@@ -1730,6 +1749,8 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None,
+            claim_ttl_seconds: None,
+            check_ttl_seconds: None,
             settlement: Some(Settlement::Native(NATIVE.into())),
             stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
@@ -1774,6 +1795,11 @@ fn list_razvyortyvaniya_razbiraetsya_kontraktom() {
                "кеш ядер тот, что опубликован в daemon/kernel-cache/sm_89");
     assert_eq!(msg.conformance_limit_micro, 0,
                "предел пробы нулевой: внутри класса честное расхождение ровно 0");
+    // Сроки. Без них взятое и брошенное задание висело бы вечно, запирая
+    // деньги заказчика; нулевой срок — наоборот, позволял бы отобрать
+    // задание в том же блоке.
+    assert_eq!(msg.claim_ttl_seconds, CLAIM_TTL, "срок на ответ");
+    assert_eq!(msg.check_ttl_seconds, CHECK_TTL, "срок на сбор проверок");
     assert_eq!(msg.verifier_fee_bps, FEE_BPS);
     // Решено 14 октября: залог 30 400 AXM, расчёт родной монетой,
     // конфискат по адресу (BankMsg::Burn на самой Axiome не проверен).
@@ -1826,6 +1852,8 @@ fn listy_klassov_otlichayutsya_tolko_klassom() {
         assert_eq!(m.verifier_fee_bps, base.verifier_fee_bps, "{arch}: доля");
         assert_eq!(m.conformance_limit_micro, base.conformance_limit_micro,
                    "{arch}: предел пробы");
+        assert_eq!(m.claim_ttl_seconds, base.claim_ttl_seconds, "{arch}: срок ответа");
+        assert_eq!(m.check_ttl_seconds, base.check_ttl_seconds, "{arch}: срок проверок");
         assert_eq!(m.conformance_lens, base.conformance_lens,
                    "{arch}: тексты пробы у классов одни и те же");
         assert_eq!(m.admin, base.admin, "{arch}: админ");
@@ -1936,7 +1964,9 @@ fn povyshenie_doli_ne_urezaet_vyruchku_ispolnitelya() {
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
-            conformance_ref: None, settlement: None, stake_denom: None,
+            conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
+            settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: Some(5_000), forfeit: None,
         }).unwrap();
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
@@ -2019,7 +2049,9 @@ fn administratora_mozhno_smenit() {
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
-            conformance_ref: None, settlement: None, stake_denom: None,
+            conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
+            settlement: None, stake_denom: None,
             min_stake: None, verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     // Прежний администратор больше ничего не правит.
@@ -2029,6 +2061,7 @@ fn administratora_mozhno_smenit() {
             checks_required: Some(1), pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap_err();
@@ -2040,6 +2073,7 @@ fn administratora_mozhno_smenit() {
             checks_required: Some(3), pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
+            claim_ttl_seconds: None, check_ttl_seconds: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
@@ -2091,7 +2125,7 @@ fn perenos_sbrasyvaet_attestora_i_hranit_ostalnoe() {
     assert!(res
         .attributes
         .iter()
-        .any(|a| a.key == "changed" && a.value == "attestor_dropped"));
+        .any(|a| a.key == "changed" && a.value == "attestor_dropped,ttl_added"));
     assert_eq!(
         STATE_VERSION.load(deps.as_ref().storage).unwrap(),
         CURRENT_VERSION
@@ -2110,6 +2144,10 @@ fn perenos_sbrasyvaet_attestora_i_hranit_ostalnoe() {
     // Версия пробы НЕ сбрасывается переносом: выданные пробы остаются
     // действительными, иначе перенос вышиб бы из сети всех честных узлов.
     assert_eq!(cfg.conformance_version, 1);
+    // Сроки появились со значениями переносчика, а не нулевыми: нулевой
+    // срок означал бы, что задание отбирают в том же блоке, что взяли.
+    assert_eq!(cfg.claim_ttl_seconds, 600);
+    assert_eq!(cfg.check_ttl_seconds, 3600);
     assert_eq!(cfg.min_stake, Uint128::new(MIN_STAKE));
     assert_eq!(cfg.verifier_fee_bps, FEE_BPS);
     assert!(matches!(cfg.forfeit, Forfeit::ToAddress(_)));
@@ -2180,4 +2218,221 @@ fn perenos_ne_tronul_ispolnitelya_i_zadaniya() {
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::Finalize { job_id: id }).unwrap();
+}
+
+use crate::state::STATE_VERSION as STATE_VERSION_FOR_TEST;
+
+/// Записать настройки формы 2 — те, что лежат у трёх развёрнутых
+/// экземпляров с 26 октября: без `attestor`, но и без сроков.
+fn put_v2_config(deps: DepsMut) {
+    let v2 = serde_json::json!({
+        "admin": ADMIN,
+        "checks_required": CHECKS,
+        "pinned_model": MODEL,
+        "pinned_runtime": RUNTIME,
+        "pinned_dtype": DTYPE,
+        "pinned_arch": ARCH,
+        "kernel_cache_hash": CACHE,
+        "conformance_limit_micro": CONF_LIMIT,
+        "conformance_ref_hash": commit_hash(&probe_ref()),
+        "conformance_lens": PROBE_LENS.to_vec(),
+        "conformance_version": 7,
+        "settlement": {"native": STAKE},
+        "stake_denom": STAKE,
+        "min_stake": MIN_STAKE.to_string(),
+        "verifier_fee_bps": FEE_BPS,
+        "forfeit": {"to_address": "forfeit_address"},
+    });
+    deps.storage
+        .set(b"config", serde_json::to_vec(&v2).unwrap().as_slice());
+}
+
+#[test]
+fn perenos_formy_2_dobavlyaet_sroki() {
+    // Это тот перенос, который пойдёт на живую цепочку: все три
+    // экземпляра сейчас на форме 2.
+    let mut deps = mock_dependencies();
+    put_v2_config(deps.as_mut());
+    STATE_VERSION_FOR_TEST
+        .save(deps.as_mut().storage, &2u16)
+        .unwrap();
+    let res = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "from" && a.value == "2"));
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "changed" && a.value == "ttl_added"));
+    let cfg: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.claim_ttl_seconds, 600);
+    assert_eq!(cfg.check_ttl_seconds, 3600);
+    // Версия пробы взята КАК БЫЛА, а не сброшена в 1: иначе перенос
+    // обнулил бы все выданные пробы и вышиб из сети честные узлы.
+    assert_eq!(cfg.conformance_version, 7);
+    assert_eq!(cfg.verifier_fee_bps, FEE_BPS);
+    assert_eq!(cfg.min_stake, Uint128::new(MIN_STAKE));
+    assert_eq!(
+        STATE_VERSION_FOR_TEST.load(deps.as_ref().storage).unwrap(),
+        3
+    );
+}
+
+// --- сроки заданий ---------------------------------------------------------
+//
+// Найдено 26 октября при разборе SetSuspended: срока у задания не было
+// вовсе, и в трёх случаях деньги заказчика запирались в контракте
+// навсегда. Ниже по тесту на каждый.
+
+/// Время через `shift` секунд от обычного.
+fn env_after(shift: u64) -> cosmwasm_std::Env {
+    let mut e = mock_env();
+    e.block.time = e.block.time.plus_seconds(shift);
+    e
+}
+
+#[test]
+fn nevzyatoe_zadanie_zakazchik_zabiraet() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    submit_job_native(deps.as_mut());
+    // Чужой не забирает.
+    let err = execute(deps.as_mut(), mock_env(), mock_info("ne_klient", &[]),
+        ExecuteMsg::CancelJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NotClient), "вышло {err:?}");
+    // Заказчик забирает ЦЕНУ И ДОЛЮ: внёс он и то и другое.
+    let res = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
+        ExecuteMsg::CancelJob { job_id: 1 }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "refunded"
+        && a.value == TOTAL.to_string()), "вернули не всё: {:?}", res.attributes);
+    assert_eq!(res.messages.len(), 1, "один перевод заказчику");
+    let j: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(j.state, JobState::Settled);
+    // Дважды не забрать.
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
+        ExecuteMsg::CancelJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongJobState { .. }), "вышло {err:?}");
+}
+
+#[test]
+fn vzyatoe_zadanie_ne_otmenyaetsya_a_otbiraetsya_po_sroku() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    submit_job_native(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
+    // Пока взято — заказчик не отменяет: иначе он забирал бы деньги у
+    // работающего узла.
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
+        ExecuteMsg::CancelJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongJobState { .. }), "вышло {err:?}");
+    // И до срока не отобрать.
+    let err = execute(deps.as_mut(), env_after(CLAIM_TTL), mock_info("kto_ugodno", &[]),
+        ExecuteMsg::ReleaseJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NotExpired { .. }), "вышло {err:?}");
+    // После срока отбирает КТО УГОДНО, не админ.
+    let res = execute(deps.as_mut(), env_after(CLAIM_TTL + 1), mock_info("kto_ugodno", &[]),
+        ExecuteMsg::ReleaseJob { job_id: 1 }).unwrap();
+    assert!(res.messages.is_empty(), "деньги остаются в контракте");
+    let j: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(j.state, JobState::Open, "задание снова свободно");
+    assert_eq!(j.executor, None);
+    assert_eq!(j.price, Uint128::new(PRICE), "цена цела");
+    // Исполнителю записано брошенное, но НЕ наказание.
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.abandoned, 1);
+    assert_eq!(e.status, ExecutorStatus::Active, "бана нет");
+    assert_eq!(e.stake, Uint128::new(MIN_STAKE), "залог цел");
+    assert_eq!(e.convictions, 0);
+    // И задание берёт следующий — хоть тот же самый.
+    execute(deps.as_mut(), env_after(CLAIM_TTL + 2), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
+}
+
+#[test]
+fn bez_proverok_dengi_vozvrashchayutsya_zakazchiku() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    submit_job_native(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::SubmitAnswer { job_id: 1, answer_hash: "ah".into(),
+            logprobs_hash: COMMIT.into(), answer_tokens: 64 }).unwrap();
+    // Пришла ОДНА проверка из двух — вердикта нет.
+    submit_checks_matching(deps.as_mut(), 1, 1);
+    let err = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NotEnoughChecks { .. }), "вышло {err:?}");
+    // До срока закрыть нельзя.
+    let err = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::ExpireChecks { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NotExpired { .. }), "вышло {err:?}");
+    // После срока: заказчику цена и неразошедшаяся часть доли,
+    // пришедшему проверяющему — одна доля из двух.
+    let res = execute(deps.as_mut(), env_after(CHECK_TTL + 1), mock_info("anyone", &[]),
+        ExecuteMsg::ExpireChecks { job_id: 1 }).unwrap();
+    let share = FEE / CHECKS as u128;
+    assert!(res.attributes.iter().any(|a| a.key == "verifier_fees"
+        && a.value == share.to_string()), "доля пришедшему: {:?}", res.attributes);
+    assert!(res.attributes.iter().any(|a| a.key == "refunded"
+        && a.value == (TOTAL - share).to_string()),
+        "заказчику остальное: {:?}", res.attributes);
+    // Исполнитель не получил ничего и не осуждён: вердикта не было.
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.status, ExecutorStatus::Active, "бана нет");
+    assert_eq!(e.stake, Uint128::new(MIN_STAKE), "залог цел");
+    assert_eq!(e.jobs_done, 0, "задание не зачтено: вердикта нет");
+    assert_eq!(e.convictions, 0);
+    let j: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(j.state, JobState::Settled);
+    assert_eq!(j.guilty, None, "вердикта нет, а не «не виновен»");
+    // Дважды не закрыть.
+    let err = execute(deps.as_mut(), env_after(CHECK_TTL + 2), mock_info("anyone", &[]),
+        ExecuteMsg::ExpireChecks { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::WrongJobState { .. }), "вышло {err:?}");
+}
+
+#[test]
+fn srokom_nelzya_uvesti_zadanie_ot_gotovogo_verdikta() {
+    // Проверок хватает — закрывать надо Finalize. Иначе сроком можно
+    // было бы увести задание от вердикта: дождаться часа и вернуть
+    // деньги заказчику, хотя виновность уже доказуема.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
+    let err = execute(deps.as_mut(), env_after(CHECK_TTL + 1), mock_info("anyone", &[]),
+        ExecuteMsg::ExpireChecks { job_id: id }).unwrap_err();
+    assert!(matches!(err, ContractError::ChecksEnough { got: 2, need: 2 }),
+            "вышло {err:?}");
+    // А вердикт выносится как обычно.
+    execute(deps.as_mut(), env_after(CHECK_TTL + 2), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+}
+
+#[test]
+fn nulevoy_srok_ne_prinimaetsya() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    for (c, k) in [(Some(0u64), None), (None, Some(0u64))] {
+        let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+            ExecuteMsg::UpdateConfig {
+                admin: None, checks_required: None,
+                pinned_arch: None, kernel_cache_hash: None,
+                pinned_model: None, pinned_runtime: None, pinned_dtype: None,
+                conformance_limit_micro: None, conformance_ref: None,
+                claim_ttl_seconds: c, check_ttl_seconds: k,
+                settlement: None, stake_denom: None, min_stake: None,
+                verifier_fee_bps: None, forfeit: None,
+            }).unwrap_err();
+        assert!(matches!(err, ContractError::ZeroTtl), "вышло {err:?}");
+    }
 }

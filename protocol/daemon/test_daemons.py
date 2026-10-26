@@ -199,6 +199,7 @@ def test_chain_params():
         "conformance_ref_hash": "0" * 64,
         "conformance_lens": [3, 3],
         "conformance_version": 1,
+        "claim_ttl_seconds": 600, "check_ttl_seconds": 3600,
     }
     chain.query_smart = lambda rest, c, q, timeout=20: cfg
     p = chain.load_params("http://rest", "axm1c")
@@ -206,6 +207,19 @@ def test_chain_params():
     ok(p.pinned_arch == "sm_89", "архитектура класса из цепочки")
     ok(p.kernel_cache_hash == "3753554454f2c9b8", "хэш кеша ядер из цепочки")
     ok(p.stake_denom == "uaxm", "денom залога из цепочки")
+    ok((p.claim_ttl_seconds, p.check_ttl_seconds) == (600, 3600),
+       "сроки заданий из цепочки")
+    # Без срока в настройках демон не работает: это не мелочь, которую
+    # можно подставить по умолчанию. Умолчание разошлось бы с цепочкой, а
+    # по сроку решается, успеет ли узел и когда задание у него отберут.
+    bez = {k: v for k, v in cfg.items() if k != "claim_ttl_seconds"}
+    chain.query_smart = lambda rest, c, q, timeout=20: bez
+    try:
+        chain.load_params("http://rest", "axm1c")
+        ok(False, "настройки без срока должны отвергаться")
+    except chain.ChainUnavailable as e:
+        ok("claim_ttl_seconds" in str(e), "сказано, какого поля нет")
+    chain.query_smart = lambda rest, c, q, timeout=20: cfg
     ok(chain.settlement_label(p.settlement) == "cw20:axm1uz…",
        "вид расчёта прочитан")
     ok(chain.settlement_label({"native": "uaxm"}) == "uaxm",

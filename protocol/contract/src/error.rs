@@ -18,6 +18,18 @@ pub enum ContractError {
     #[error("настроек в хранилище нет: переносить нечего")]
     MigrateNoConfig,
 
+    #[error("срок не вышел: прошло {passed} с из {ttl}")]
+    NotExpired { passed: u64, ttl: u64 },
+
+    #[error("забрать задание может только заказчик")]
+    NotClient,
+
+    #[error("проверок уже достаточно ({got} из {need}): закрывать надо Finalize")]
+    ChecksEnough { got: u32, need: u32 },
+
+    #[error("срок не может быть нулевым")]
+    ZeroTtl,
+
     #[error("исполнитель не зарегистрирован")]
     ExecutorUnknown,
 

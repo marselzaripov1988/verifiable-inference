@@ -9,9 +9,9 @@ use crate::msg::{
     MigrateMsg, QueryMsg, ReceiveHook,
 };
 use crate::state::{
-    Check, Config, ConfigV1, Conformance, Executor, ExecutorStatus, Forfeit, Job, JobState, Micro,
-    MicroLog, Settlement, CHECKS, CONFIG, CURRENT_VERSION, EXECUTORS, JOBS, NEXT_JOB,
-    STATE_VERSION,
+    Check, Config, ConfigV1, ConfigV2, Conformance, Executor, ExecutorStatus, Forfeit, Job,
+    JobState, Micro, MicroLog, Settlement, CHECKS, CONFIG, CURRENT_VERSION, EXECUTORS, JOBS,
+    NEXT_JOB, STATE_VERSION,
 };
 
 /// Плата проверяющим от цены. Деление ВВЕРХ.
@@ -116,6 +116,11 @@ pub fn instantiate(
     if msg.conformance_lens.is_empty() {
         return Err(ContractError::EmptyProbe);
     }
+    // Нулевой срок означал бы, что задание можно отобрать у исполнителя
+    // в тот же блок, в котором он его взял.
+    if msg.claim_ttl_seconds == 0 || msg.check_ttl_seconds == 0 {
+        return Err(ContractError::ZeroTtl);
+    }
     let cfg = Config {
         admin: deps.api.addr_validate(&msg.admin)?,
         checks_required: msg.checks_required,
@@ -128,6 +133,8 @@ pub fn instantiate(
         conformance_ref_hash: msg.conformance_ref_hash,
         conformance_lens: msg.conformance_lens,
         conformance_version: 1,
+        claim_ttl_seconds: msg.claim_ttl_seconds,
+        check_ttl_seconds: msg.check_ttl_seconds,
         // Адрес CW20 проверяется здесь: в сообщении он приходит как
         // Addr, а Addr из сообщения НЕ проверен — это известная ловушка
         // cosmwasm, и неверный адрес иначе всплыл бы при первой выплате.
@@ -176,30 +183,47 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
             code: CURRENT_VERSION,
         });
     }
-    if was != 1 {
+    if was != 1 && was != 2 {
         return Err(ContractError::MigrateUnknown { have: was });
     }
-    // Форма 1 -> 2: из настроек уходит `attestor`. Читается прежней
-    // структурой, потому что нынешняя запрещает неизвестные поля и на
-    // этих байтах разбор провалился бы.
+    // Настройки читаются СВОЕЙ формой: нынешняя структура запрещает
+    // неизвестные поля и не прощает пропущенных, поэтому ни байты формы
+    // 1 (там лишний `attestor`), ни байты формы 2 (там нет сроков) в неё
+    // не разберутся. Угадывать разбором «а вдруг подойдёт» нельзя:
+    // молчаливая ошибка на хранилище живой сети хуже отказа.
     let raw = deps
         .storage
         .get(b"config")
         .ok_or(ContractError::MigrateNoConfig)?;
-    let old: ConfigV1 = from_json(&raw)?;
-    CONFIG.save(deps.storage, &old.migrate())?;
+    let v2: ConfigV2 = if was == 1 {
+        from_json::<ConfigV1>(&raw)?.to_v2()
+    } else {
+        from_json(&raw)?
+    };
+    // Сроки при переносе берутся отсюда, а не из сообщения: сообщение
+    // пустое, и пусть остаётся пустым — значения всё равно надо будет
+    // подбирать по опыту сети, а менять их умеет UpdateConfig.
+    //
+    // 600 с на ответ: ответ на 4096 токенов идёт секунды, десять минут —
+    // запас на холодный старт и очередь. 3600 с на сбор проверок:
+    // проверяющих может не быть в сети прямо сейчас, а час — предел, за
+    // которым ждать уже незачем.
+    let cfg = v2.to_v3(600, 3600);
+    CONFIG.save(deps.storage, &cfg)?;
     STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
     Ok(Response::new()
         .add_attribute("action", "migrate")
-        .add_attribute("from", "1")
+        .add_attribute("from", was.to_string())
         .add_attribute("to", CURRENT_VERSION.to_string())
-        .add_attribute("changed", "attestor_dropped"))
+        .add_attribute("changed", if was == 1 { "attestor_dropped,ttl_added" } else { "ttl_added" })
+        .add_attribute("claim_ttl_seconds", cfg.claim_ttl_seconds.to_string())
+        .add_attribute("check_ttl_seconds", cfg.check_ttl_seconds.to_string()))
 }
 
 #[entry_point]
 pub fn execute(
     deps: DepsMut,
-    _env: Env,
+    env: Env,
     info: MessageInfo,
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
@@ -214,6 +238,8 @@ pub fn execute(
             kernel_cache_hash,
             conformance_limit_micro,
             conformance_ref,
+            claim_ttl_seconds,
+            check_ttl_seconds,
             settlement,
             stake_denom,
             min_stake,
@@ -231,6 +257,8 @@ pub fn execute(
             kernel_cache_hash,
             conformance_limit_micro,
             conformance_ref,
+            claim_ttl_seconds,
+            check_ttl_seconds,
             settlement,
             stake_denom,
             min_stake,
@@ -267,13 +295,16 @@ pub fn execute(
             reference_logprobs,
             executor_logprobs,
         } => dispute_conformance(deps, executor, reference_logprobs, executor_logprobs),
-        ExecuteMsg::ClaimJob { job_id } => claim_job(deps, info, job_id),
+        ExecuteMsg::ClaimJob { job_id } => claim_job(deps, env, info, job_id),
+        ExecuteMsg::CancelJob { job_id } => cancel_job(deps, info, job_id),
+        ExecuteMsg::ReleaseJob { job_id } => release_job(deps, env, job_id),
+        ExecuteMsg::ExpireChecks { job_id } => expire_checks(deps, env, job_id),
         ExecuteMsg::SubmitAnswer {
             job_id,
             answer_hash,
             logprobs_hash,
             answer_tokens,
-        } => submit_answer(deps, info, job_id, answer_hash, logprobs_hash, answer_tokens),
+        } => submit_answer(deps, env, info, job_id, answer_hash, logprobs_hash, answer_tokens),
         ExecuteMsg::SubmitCheck {
             job_id,
             divergence_micro,
@@ -302,6 +333,8 @@ fn update_config(
     kernel_cache_hash: Option<String>,
     conformance_limit_micro: Option<Micro>,
     conformance_ref: Option<ConformanceRef>,
+    claim_ttl_seconds: Option<u64>,
+    check_ttl_seconds: Option<u64>,
     settlement: Option<Settlement>,
     stake_denom: Option<String>,
     min_stake: Option<Uint128>,
@@ -362,6 +395,19 @@ fn update_config(
     }
     if rotate {
         cfg.conformance_version += 1;
+    }
+    // Сроки сменить можно, обнулить — нет: нулевой срок означал бы, что
+    // задание отбирают в том же блоке, в котором взяли.
+    for (new, field) in [
+        (claim_ttl_seconds, &mut cfg.claim_ttl_seconds),
+        (check_ttl_seconds, &mut cfg.check_ttl_seconds),
+    ] {
+        if let Some(t) = new {
+            if t == 0 {
+                return Err(ContractError::ZeroTtl);
+            }
+            *field = t;
+        }
     }
     if let Some(st) = settlement {
         cfg.settlement = match st {
@@ -446,6 +492,7 @@ fn register_executor(
             // проверяет цепочка.
             status: ExecutorStatus::Active,
             jobs_done: 0,
+            abandoned: 0,
             convictions: 0,
             stake: Uint128::zero(),
             conformance: None,
@@ -623,6 +670,8 @@ fn create_job(
             answer_tokens: None,
             guilty: None,
             reveal_verified: None,
+            claimed_at: None,
+            answered_at: None,
             price,
             fee_total,
             paid: false,
@@ -828,7 +877,12 @@ fn dispute_conformance(
         .add_attribute("lied", lied.to_string()))
 }
 
-fn claim_job(deps: DepsMut, info: MessageInfo, job_id: u64) -> Result<Response, ContractError> {
+fn claim_job(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    job_id: u64,
+) -> Result<Response, ContractError> {
     active_executor(&deps, &info.sender)?;
     let mut job = JOBS
         .may_load(deps.storage, job_id)?
@@ -841,6 +895,7 @@ fn claim_job(deps: DepsMut, info: MessageInfo, job_id: u64) -> Result<Response, 
     }
     job.executor = Some(info.sender.clone());
     job.state = JobState::Claimed;
+    job.claimed_at = Some(env.block.time.seconds());
     JOBS.save(deps.storage, job_id, &job)?;
     Ok(Response::new()
         .add_attribute("action", "claim_job")
@@ -849,6 +904,7 @@ fn claim_job(deps: DepsMut, info: MessageInfo, job_id: u64) -> Result<Response, 
 
 fn submit_answer(
     deps: DepsMut,
+    env: Env,
     info: MessageInfo,
     job_id: u64,
     answer_hash: String,
@@ -877,10 +933,161 @@ fn submit_answer(
     job.logprobs_hash = Some(logprobs_hash);
     job.answer_tokens = Some(answer_tokens);
     job.state = JobState::Answered;
+    job.answered_at = Some(env.block.time.seconds());
     JOBS.save(deps.storage, job_id, &job)?;
     Ok(Response::new()
         .add_attribute("action", "submit_answer")
         .add_attribute("job_id", job_id.to_string()))
+}
+
+/// Сколько секунд прошло с отметки. Отсутствие отметки означает
+/// «давно»: такие записи сделаны до появления сроков, и застряли именно
+/// они.
+fn since(env: &Env, at: Option<u64>) -> u64 {
+    env.block.time.seconds().saturating_sub(at.unwrap_or(0))
+}
+
+/// Вернуть заказчику всё внесённое по заданию и закрыть его.
+///
+/// Одно место на оба случая возврата — отмену невзятого и истёкший сбор
+/// проверок: иначе второй забыли бы обновить при правке первого.
+fn refund_client(
+    cfg: &Config,
+    job: &mut Job,
+    amount: Uint128,
+) -> Result<Vec<CosmosMsg>, ContractError> {
+    job.state = JobState::Settled;
+    job.paid = true;
+    let mut msgs = Vec::new();
+    if !amount.is_zero() {
+        msgs.push(pay(cfg, &job.client, amount)?);
+    }
+    Ok(msgs)
+}
+
+fn cancel_job(deps: DepsMut, info: MessageInfo, job_id: u64) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+    let mut job = JOBS
+        .may_load(deps.storage, job_id)?
+        .ok_or(ContractError::JobUnknown)?;
+    // Только `Open`. Взятое задание отбирают по сроку (ReleaseJob), а не
+    // отменой: иначе заказчик забирал бы деньги у работающего узла.
+    if job.state != JobState::Open {
+        return Err(ContractError::WrongJobState {
+            state: format!("{:?}", job.state),
+            expected: "Open".into(),
+        });
+    }
+    if job.client != info.sender {
+        return Err(ContractError::NotClient);
+    }
+    let back = job.price + job.fee_total;
+    let msgs = refund_client(&cfg, &mut job, back)?;
+    JOBS.save(deps.storage, job_id, &job)?;
+    Ok(Response::new()
+        .add_messages(msgs)
+        .add_attribute("action", "cancel_job")
+        .add_attribute("job_id", job_id.to_string())
+        .add_attribute("refunded", back.to_string()))
+}
+
+fn release_job(deps: DepsMut, env: Env, job_id: u64) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+    let mut job = JOBS
+        .may_load(deps.storage, job_id)?
+        .ok_or(ContractError::JobUnknown)?;
+    if job.state != JobState::Claimed {
+        return Err(ContractError::WrongJobState {
+            state: format!("{:?}", job.state),
+            expected: "Claimed".into(),
+        });
+    }
+    let passed = since(&env, job.claimed_at);
+    if passed <= cfg.claim_ttl_seconds {
+        return Err(ContractError::NotExpired {
+            passed,
+            ttl: cfg.claim_ttl_seconds,
+        });
+    }
+    // Исполнителю записывается брошенное задание — но НЕ наказание:
+    // молчание не доказывает подлога, узел мог упасть. Залог цел, бана
+    // нет, браться за следующие задания он может.
+    let who = job.executor.clone();
+    if let Some(addr) = &who {
+        if let Some(mut e) = EXECUTORS.may_load(deps.storage, addr)? {
+            e.abandoned += 1;
+            EXECUTORS.save(deps.storage, addr, &e)?;
+        }
+    }
+    // Деньги остаются в контракте и ждут следующего исполнителя:
+    // заказчик своего не теряет и заново не платит.
+    job.executor = None;
+    job.claimed_at = None;
+    job.state = JobState::Open;
+    JOBS.save(deps.storage, job_id, &job)?;
+    Ok(Response::new()
+        .add_attribute("action", "release_job")
+        .add_attribute("job_id", job_id.to_string())
+        .add_attribute("passed", passed.to_string())
+        .add_attribute("abandoned_by", who.map(|a| a.to_string()).unwrap_or_default()))
+}
+
+fn expire_checks(deps: DepsMut, env: Env, job_id: u64) -> Result<Response, ContractError> {
+    let cfg = CONFIG.load(deps.storage)?;
+    let mut job = JOBS
+        .may_load(deps.storage, job_id)?
+        .ok_or(ContractError::JobUnknown)?;
+    if job.state != JobState::Answered {
+        return Err(ContractError::WrongJobState {
+            state: format!("{:?}", job.state),
+            expected: "Answered".into(),
+        });
+    }
+    if job.paid {
+        return Err(ContractError::AlreadyPaid);
+    }
+    let checks = load_checks(deps.as_ref(), job_id)?;
+    // Проверок хватает — закрывать надо вердиктом, а не сроком. Иначе
+    // сроком можно было бы увести задание от готового вердикта.
+    if (checks.len() as u32) >= cfg.checks_required {
+        return Err(ContractError::ChecksEnough {
+            got: checks.len() as u32,
+            need: cfg.checks_required,
+        });
+    }
+    let passed = since(&env, job.answered_at);
+    if passed <= cfg.check_ttl_seconds {
+        return Err(ContractError::NotExpired {
+            passed,
+            ttl: cfg.check_ttl_seconds,
+        });
+    }
+    // Пришедшим проверяющим — их доля: работу они сделали, и платят за
+    // неё независимо от вердикта. Доля считается от ТРЕБУЕМОГО числа
+    // проверок, а не от пришедших: пришёл один из двух — получает одну
+    // долю, а не обе.
+    let share = job.fee_total / Uint128::from(cfg.checks_required as u128);
+    let mut msgs = Vec::new();
+    let mut paid_fees = Uint128::zero();
+    for c in &checks {
+        if !share.is_zero() {
+            msgs.push(pay(&cfg, &c.checker, share)?);
+            paid_fees += share;
+        }
+    }
+    // Остальное заказчику: нет проверки — нет оплаты. Исполнитель
+    // работал зря, но платить за неподтверждённый ответ заказчик не
+    // обязан. Осуждения нет: вердикта нет, залог цел, бана нет.
+    let back = job.price + job.fee_total - paid_fees;
+    msgs.extend(refund_client(&cfg, &mut job, back)?);
+    JOBS.save(deps.storage, job_id, &job)?;
+    Ok(Response::new()
+        .add_messages(msgs)
+        .add_attribute("action", "expire_checks")
+        .add_attribute("job_id", job_id.to_string())
+        .add_attribute("checks", checks.len().to_string())
+        .add_attribute("verifier_fees", paid_fees.to_string())
+        .add_attribute("refunded", back.to_string()))
 }
 
 fn submit_check(

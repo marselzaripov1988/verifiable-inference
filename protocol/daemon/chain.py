@@ -48,6 +48,14 @@ class Params:
     conformance_limit_micro: int
     conformance_ref_hash: str
     conformance_lens: tuple
+    # --- сроки заданий ---
+    #: Сколько секунд исполнитель вправе держать взятое задание и сколько
+    #: собираются проверки. Читаются, но демоны на них пока НЕ смотрят:
+    #: ни отказа брать задание, которое не успеть, ни напоминания
+    #: проверяющему тут ещё нет. Значения — чтобы о сроке было видно из
+    #: цепочки, а не из переписки.
+    claim_ttl_seconds: int
+    check_ttl_seconds: int
     conformance_version: int
 
 
@@ -87,7 +95,8 @@ def load_params(rest, contract):
             "pinned_arch", "kernel_cache_hash",
             "settlement", "stake_denom",
             "conformance_limit_micro", "conformance_ref_hash",
-            "conformance_lens", "conformance_version")
+            "conformance_lens", "conformance_version",
+            "claim_ttl_seconds", "check_ttl_seconds")
     miss = [k for k in need if k not in d]
     if miss:
         raise ChainUnavailable(f"в настройках нет полей: {miss}")
@@ -103,6 +112,8 @@ def load_params(rest, contract):
         conformance_limit_micro=int(d["conformance_limit_micro"]),
         conformance_ref_hash=d["conformance_ref_hash"],
         conformance_lens=tuple(int(x) for x in d["conformance_lens"]),
+        claim_ttl_seconds=int(d["claim_ttl_seconds"]),
+        check_ttl_seconds=int(d["check_ttl_seconds"]),
         conformance_version=int(d["conformance_version"]),
     )
 
