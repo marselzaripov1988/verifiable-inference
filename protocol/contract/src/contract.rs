@@ -252,10 +252,6 @@ pub fn execute(
             card_class,
             kernel_cache_hash,
         ),
-        ExecuteMsg::SetSuspended {
-            executor,
-            suspended,
-        } => set_suspended(deps, info, executor, suspended),
         ExecuteMsg::DepositStake {} => deposit_stake(deps, info),
         ExecuteMsg::WithdrawStake { amount } => withdraw_stake(deps, info, amount),
         ExecuteMsg::SubmitJob { prompt_hash, price } => {
@@ -460,32 +456,6 @@ fn register_executor(
         .add_attribute("executor", info.sender))
 }
 
-fn set_suspended(
-    deps: DepsMut,
-    info: MessageInfo,
-    executor: String,
-    suspended: bool,
-) -> Result<Response, ContractError> {
-    let cfg = CONFIG.load(deps.storage)?;
-    if info.sender != cfg.admin {
-        return Err(ContractError::NotAdmin);
-    }
-    let addr = deps.api.addr_validate(&executor)?;
-    let mut e = EXECUTORS
-        .may_load(deps.storage, &addr)?
-        .ok_or(ContractError::ExecutorUnknown)?;
-    if e.status == ExecutorStatus::Banned {
-        return Err(ContractError::ExecutorBanned);
-    }
-    e.status = if suspended {
-        ExecutorStatus::Suspended
-    } else {
-        ExecutorStatus::Active
-    };
-    EXECUTORS.save(deps.storage, &addr, &e)?;
-    Ok(Response::new().add_attribute("action", "set_suspended"))
-}
-
 fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
     let sent = info
@@ -508,6 +478,14 @@ fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
     let mut e = EXECUTORS
         .may_load(deps.storage, &info.sender)?
         .ok_or(ContractError::ExecutorUnknown)?;
+    // Забаненному взнос НЕ принимается, и дело не в строгости: забрать
+    // залог забаненный не может (см. withdraw_stake), а свой он потерял
+    // при осуждении. Принять монеты значило бы запереть их навсегда —
+    // ловушку открывал бы любой повторяющий попытку демон или
+    // автоматическое пополнение.
+    if e.status == ExecutorStatus::Banned {
+        return Err(ContractError::ExecutorBanned);
+    }
     e.stake += sent;
     EXECUTORS.save(deps.storage, &info.sender, &e)?;
     Ok(Response::new()

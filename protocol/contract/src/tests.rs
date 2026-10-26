@@ -653,20 +653,26 @@ fn zabanennogo_nelzya_vernut() {
         ExecuteMsg::Finalize { job_id: id },
     )
     .unwrap();
-    // Админ не возвращает пойманного: иначе наказание ничего не стоит.
-    // Прежде здесь проверялся ещё и аттестор — теперь такой стороны нет
-    // вовсе, и способ вернуть забаненного не остался ни у кого.
+    // Вернуть забаненного не может НИКТО, и теперь это проверяется иначе,
+    // чем прежде: сообщений, меняющих статус исполнителя, в контракте не
+    // осталось вовсе. Сперва это был `Attest` аттестора, потом
+    // `SetSuspended` админа — убраны оба. Единственное, что меняет статус,
+    // — вердикт цепочки и уровень залога.
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.status, ExecutorStatus::Banned);
+    // Донести залог забаненному можно — и это его не возвращает.
     let err = execute(
         deps.as_mut(),
         mock_env(),
-        mock_info(ADMIN, &[]),
-        ExecuteMsg::SetSuspended {
-            executor: EXEC.into(),
-            suspended: false,
-        },
+        mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
+        ExecuteMsg::DepositStake {},
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::ExecutorBanned));
+    assert!(matches!(err, ContractError::ExecutorBanned), "вышло {err:?}");
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.status, ExecutorStatus::Banned, "бан не снялся");
 }
 
 #[test]

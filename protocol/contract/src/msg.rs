@@ -69,8 +69,6 @@ pub enum ExecuteMsg {
         /// бите, и сверка хэшей невозможна.
         kernel_cache_hash: String,
     },
-    /// Отстранить (обратимо) и вернуть. Только админ.
-    SetSuspended { executor: String, suspended: bool },
     /// Исполнитель вносит залог в stake_denom. Монеты идут с транзакцией.
     DepositStake {},
     /// Забрать залог. Нельзя забаненному и нельзя при незакрытых
