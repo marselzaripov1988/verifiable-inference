@@ -6,11 +6,12 @@ use cosmwasm_std::{
 use crate::error::ContractError;
 use crate::msg::{
     ChecksResponse, ConformanceRef, Cw20Execute, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg,
-    QueryMsg, ReceiveHook,
+    MigrateMsg, QueryMsg, ReceiveHook,
 };
 use crate::state::{
-    Check, Config, Conformance, Executor, ExecutorStatus, Forfeit, Job, JobState, Micro, MicroLog,
-    Settlement, CHECKS, CONFIG, EXECUTORS, JOBS, NEXT_JOB,
+    Check, Config, ConfigV1, Conformance, Executor, ExecutorStatus, Forfeit, Job, JobState, Micro,
+    MicroLog, Settlement, CHECKS, CONFIG, CURRENT_VERSION, EXECUTORS, JOBS, NEXT_JOB,
+    STATE_VERSION,
 };
 
 /// Плата проверяющим от цены. Деление ВВЕРХ.
@@ -117,7 +118,6 @@ pub fn instantiate(
     }
     let cfg = Config {
         admin: deps.api.addr_validate(&msg.admin)?,
-        attestor: deps.api.addr_validate(&msg.attestor)?,
         checks_required: msg.checks_required,
         pinned_model: msg.pinned_model,
         pinned_runtime: msg.pinned_runtime,
@@ -144,7 +144,56 @@ pub fn instantiate(
     };
     CONFIG.save(deps.storage, &cfg)?;
     NEXT_JOB.save(deps.storage, &1u64)?;
+    STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
     Ok(Response::new().add_attribute("action", "instantiate"))
+}
+
+/// Перенос хранилища на этот код.
+///
+/// Принимает только переход вперёд и только по известным формам. Чего
+/// здесь нарочно НЕТ: перехода «как-нибудь», то есть попытки разобрать
+/// настройки нынешней формой и, если не вышло, прежней. Такой перенос
+/// молча проглотил бы незнакомое хранилище, а молчание на хранилище
+/// живой сети хуже отказа.
+///
+/// Отсутствие записи о версии означает форму 1: октябрьский код её не
+/// писал. Это не догадка — другого кода у этих адресов не было.
+#[entry_point]
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let was = STATE_VERSION.may_load(deps.storage)?.unwrap_or(1);
+    if was == CURRENT_VERSION {
+        // Тот же код поверх себя. Не ошибка: так выглядит повторная
+        // отправка переноса, и она обязана быть безвредной.
+        return Ok(Response::new()
+            .add_attribute("action", "migrate")
+            .add_attribute("from", was.to_string())
+            .add_attribute("to", CURRENT_VERSION.to_string())
+            .add_attribute("changed", "nothing"));
+    }
+    if was > CURRENT_VERSION {
+        return Err(ContractError::MigrateBackwards {
+            have: was,
+            code: CURRENT_VERSION,
+        });
+    }
+    if was != 1 {
+        return Err(ContractError::MigrateUnknown { have: was });
+    }
+    // Форма 1 -> 2: из настроек уходит `attestor`. Читается прежней
+    // структурой, потому что нынешняя запрещает неизвестные поля и на
+    // этих байтах разбор провалился бы.
+    let raw = deps
+        .storage
+        .get(b"config")
+        .ok_or(ContractError::MigrateNoConfig)?;
+    let old: ConfigV1 = from_json(&raw)?;
+    CONFIG.save(deps.storage, &old.migrate())?;
+    STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
+    Ok(Response::new()
+        .add_attribute("action", "migrate")
+        .add_attribute("from", "1")
+        .add_attribute("to", CURRENT_VERSION.to_string())
+        .add_attribute("changed", "attestor_dropped"))
 }
 
 #[entry_point]
@@ -157,7 +206,6 @@ pub fn execute(
     match msg {
         ExecuteMsg::UpdateConfig {
             admin,
-            attestor,
             checks_required,
             pinned_model,
             pinned_runtime,
@@ -175,7 +223,6 @@ pub fn execute(
             deps,
             info,
             admin,
-            attestor,
             checks_required,
             pinned_model,
             pinned_runtime,
@@ -205,7 +252,6 @@ pub fn execute(
             card_class,
             kernel_cache_hash,
         ),
-        ExecuteMsg::Attest { executor, eligible } => attest(deps, info, executor, eligible),
         ExecuteMsg::SetSuspended {
             executor,
             suspended,
@@ -252,7 +298,6 @@ fn update_config(
     deps: DepsMut,
     info: MessageInfo,
     admin: Option<String>,
-    attestor: Option<String>,
     checks_required: Option<u32>,
     pinned_model: Option<String>,
     pinned_runtime: Option<String>,
@@ -275,9 +320,6 @@ fn update_config(
     // править настройки сможет только новый адрес.
     if let Some(a) = admin {
         cfg.admin = deps.api.addr_validate(&a)?;
-    }
-    if let Some(a) = attestor {
-        cfg.attestor = deps.api.addr_validate(&a)?;
     }
     if let Some(c) = checks_required {
         if c == 0 {
@@ -398,7 +440,15 @@ fn register_executor(
             dtype,
             card_class,
             kernel_cache_hash,
-            status: ExecutorStatus::Pending,
+            // Сразу Active, и это НЕ ослабление допуска. Залог и проба
+            // проверяются при каждом взятии задания (см.
+            // active_executor), так что зарегистрировавшийся без залога
+            // и без пробы не получит ничего. Прежде здесь стоял Pending
+            // и ждал подписи аттестора — единственного нецепочечного
+            // условия во всём правиле. Решено 26 октября: условие,
+            // которое проверяет человек, заменено условиями, которые
+            // проверяет цепочка.
+            status: ExecutorStatus::Active,
             jobs_done: 0,
             convictions: 0,
             stake: Uint128::zero(),
@@ -408,37 +458,6 @@ fn register_executor(
     Ok(Response::new()
         .add_attribute("action", "register_executor")
         .add_attribute("executor", info.sender))
-}
-
-fn attest(
-    deps: DepsMut,
-    info: MessageInfo,
-    executor: String,
-    eligible: bool,
-) -> Result<Response, ContractError> {
-    let cfg = CONFIG.load(deps.storage)?;
-    if info.sender != cfg.attestor {
-        return Err(ContractError::NotAttestor);
-    }
-    let addr = deps.api.addr_validate(&executor)?;
-    let mut e = EXECUTORS
-        .may_load(deps.storage, &addr)?
-        .ok_or(ContractError::ExecutorUnknown)?;
-    // Бан необратим. Attestor не может вернуть пойманного на подлоге —
-    // иначе наказание ничего не стоит.
-    if e.status == ExecutorStatus::Banned {
-        return Err(ContractError::ExecutorBanned);
-    }
-    e.status = if eligible {
-        ExecutorStatus::Active
-    } else {
-        ExecutorStatus::Pending
-    };
-    EXECUTORS.save(deps.storage, &addr, &e)?;
-    Ok(Response::new()
-        .add_attribute("action", "attest")
-        .add_attribute("executor", addr)
-        .add_attribute("eligible", eligible.to_string()))
 }
 
 fn set_suspended(

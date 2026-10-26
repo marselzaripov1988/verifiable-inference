@@ -28,24 +28,6 @@ pub type MicroLog = i64;
 pub struct Config {
     /// Кто может менять настройки и отстранять исполнителей.
     pub admin: Addr,
-    /// Кто подтверждает допуск исполнителя.
-    ///
-    /// Вынесено наружу не от лени: контракт НЕ МОЖЕТ прочитать
-    /// x/referral. Набор возможностей wasm вшит в узел, и у axmd 2.2.1 он
-    /// такой — `iterator,staking,distribution,cosmwasm_1_1..1_4`, —
-    /// `stargate` в нём отсутствует. Проверено 24 октября по самому
-    /// двоичному файлу, а не предположено.
-    ///
-    /// Значит проверку статуса делает кто-то вне контракта и сообщает
-    /// результат сюда. Это ограничение площадки, и оно должно быть видно
-    /// в коде, а не спрятано в договорённости.
-    ///
-    /// И это НЕ механизм реферального допуска: аттестор может допустить
-    /// кого угодно, и контракт об этом не узнает. Называть нынешнее
-    /// устройство «доступом через реферальную структуру» нельзя — в нём
-    /// участвует подпись доверенного адреса, а не структура. Разбор и
-    /// выбор пути — в protocol/РЕФЕРАЛКА.md.
-    pub attestor: Addr,
     /// Класс, внутри которого узлы обязаны считать ПОБИТОВО одинаково.
     ///
     /// Архитектура и кеш скомпилированных ядер. Второе не прихоть: vLLM
@@ -206,11 +188,28 @@ pub enum Forfeit {
     ToAddress(Addr),
 }
 
+/// Состояние исполнителя.
+///
+/// **Допуск механизмом, а не доверием.** Принято 26 октября. Прежде
+/// между регистрацией и работой стоял `attestor` — доверенный адрес,
+/// который подписью переводил узел в `Active`. Он был единственным
+/// нецепочечным условием во всём правиле и мог допустить кого угодно, а
+/// контракт об этом не узнал бы. Теперь регистрация сразу даёт `Active`,
+/// а допуск держится на том, что цепочка проверяет сама при КАЖДОМ
+/// взятии задания: залог не ниже `min_stake` и свежая проба с нулевым
+/// расхождением. Разбор выбора — в protocol/РЕФЕРАЛКА.md.
+///
+/// Привязка к реферальной структуре сюда вернётся, когда у площадки
+/// появится возможность `stargate`: тогда условие будет читать
+/// `x/referral` сам контракт, то есть снова цепочка, а не человек.
 #[cw_serde]
 pub enum ExecutorStatus {
-    /// Зарегистрировался, допуск не подтверждён. Заданий не получает.
+    /// Залога не хватает. Заданий не получает, пока не донесёт.
+    ///
+    /// Прежде это значило «допуск не подтверждён аттестором». Теперь
+    /// сюда попадают только те, кто забрал залог ниже `min_stake`.
     Pending,
-    /// Допущен, может брать задания.
+    /// Может брать задания — если залог на месте и проба свежая.
     Active,
     /// Отстранён администратором. Обратимо.
     Suspended,
@@ -332,3 +331,67 @@ pub const NEXT_JOB: Item<u64> = Item::new("next_job");
 /// на одно задание — иначе четыре «независимые» проверки мог бы сдать
 /// один, и всё правило обессмысливается.
 pub const CHECKS: Map<(u64, &Addr), Check> = Map::new("checks");
+
+/// Форма хранилища. Её читает `migrate`, чтобы знать, что перед ним.
+///
+/// Нужна затем, что перенос обязан быть НЕ догадкой. `cw_serde`
+/// запрещает неизвестные поля, и настройки прежней формы в нынешнюю
+/// структуру не разберутся вовсе — значит переносчику нужно знать, какую
+/// именно форму читать. Без записанной версии это пришлось бы угадывать
+/// по тому, удалось ли разобрать; угадывание на хранилище живой сети
+/// недопустимо.
+pub const STATE_VERSION: Item<u16> = Item::new("state_version");
+
+/// Нынешняя форма. 1 — с `attestor`, 2 — без него.
+pub const CURRENT_VERSION: u16 = 2;
+
+/// Настройки формы 1: с `attestor`. Нужна только переносчику.
+///
+/// Не `cw_serde`: у того включён `deny_unknown_fields`, а здесь надо
+/// разобрать то, что записано на цепочке в октябре, и не более. Поля
+/// перечислены ровно те, что были, в том же порядке.
+#[derive(serde::Deserialize)]
+pub struct ConfigV1 {
+    pub admin: Addr,
+    pub attestor: Addr,
+    pub checks_required: u32,
+    pub pinned_model: String,
+    pub pinned_runtime: String,
+    pub pinned_dtype: String,
+    pub pinned_arch: String,
+    pub kernel_cache_hash: String,
+    pub conformance_limit_micro: Micro,
+    pub conformance_ref_hash: String,
+    pub conformance_lens: Vec<u32>,
+    pub conformance_version: u64,
+    pub settlement: Settlement,
+    pub stake_denom: String,
+    pub min_stake: Uint128,
+    pub verifier_fee_bps: u16,
+    pub forfeit: Forfeit,
+}
+
+impl ConfigV1 {
+    /// Перенос в нынешнюю форму: `attestor` отбрасывается, остальное
+    /// переносится как есть.
+    pub fn migrate(self) -> Config {
+        Config {
+            admin: self.admin,
+            checks_required: self.checks_required,
+            pinned_model: self.pinned_model,
+            pinned_runtime: self.pinned_runtime,
+            pinned_dtype: self.pinned_dtype,
+            pinned_arch: self.pinned_arch,
+            kernel_cache_hash: self.kernel_cache_hash,
+            conformance_limit_micro: self.conformance_limit_micro,
+            conformance_ref_hash: self.conformance_ref_hash,
+            conformance_lens: self.conformance_lens,
+            conformance_version: self.conformance_version,
+            settlement: self.settlement,
+            stake_denom: self.stake_denom,
+            min_stake: self.min_stake,
+            verifier_fee_bps: self.verifier_fee_bps,
+            forfeit: self.forfeit,
+        }
+    }
+}

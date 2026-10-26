@@ -9,8 +9,14 @@ pub enum ContractError {
     #[error("нужны права администратора")]
     NotAdmin,
 
-    #[error("нужны права attestor")]
-    NotAttestor,
+    #[error("хранилище формы {have}, код знает до {code}: назад не переносим")]
+    MigrateBackwards { have: u16, code: u16 },
+
+    #[error("хранилище формы {have}: такой этот код не знает")]
+    MigrateUnknown { have: u16 },
+
+    #[error("настроек в хранилище нет: переносить нечего")]
+    MigrateNoConfig,
 
     #[error("исполнитель не зарегистрирован")]
     ExecutorUnknown,

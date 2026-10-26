@@ -13,18 +13,18 @@
 use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
 use cosmwasm_std::{coins, from_json, to_json_binary, Addr, DepsMut, Uint128};
 
-use crate::contract::{commit_hash, execute, instantiate, query};
+use crate::contract::{commit_hash, execute, instantiate, migrate, query};
 use crate::error::ContractError;
 use crate::msg::{
-    ChecksResponse, ConformanceRef, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg, QueryMsg,
-    ReceiveHook,
+    ChecksResponse, ConformanceRef, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg, MigrateMsg,
+    QueryMsg, ReceiveHook,
 };
 use crate::state::{
-    Executor, ExecutorStatus, Forfeit, Job, JobState, MicroLog, Settlement,
+    Config, Executor, ExecutorStatus, Forfeit, Job, JobState, MicroLog, Settlement,
+    CURRENT_VERSION, STATE_VERSION,
 };
 
 const ADMIN: &str = "admin";
-const ATTESTOR: &str = "attestor";
 const EXEC: &str = "executor1";
 const CLIENT: &str = "client1";
 
@@ -100,7 +100,6 @@ fn setup(deps: DepsMut) {
         mock_info(ADMIN, &[]),
         InstantiateMsg {
             admin: ADMIN.into(),
-            attestor: ATTESTOR.into(),
             checks_required: CHECKS,
             pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(),
@@ -120,7 +119,12 @@ fn setup(deps: DepsMut) {
     .unwrap();
 }
 
-fn register_and_attest(deps: DepsMut, who: &str) {
+/// Привести узел в рабочее состояние: регистрация, залог, проба.
+///
+/// Трёх шагов, а не четырёх: подтверждать допуск подписью больше некому.
+/// Регистрация сразу даёт `Active`, а брать задания позволяют залог и
+/// проба — ровно то, что проверяет цепочка.
+fn register_and_stake(deps: DepsMut, who: &str) {
     let mut d = deps;
     execute(
         d.branch(),
@@ -140,16 +144,6 @@ fn register_and_attest(deps: DepsMut, who: &str) {
         mock_env(),
         mock_info(who, &coins(MIN_STAKE, STAKE)),
         ExecuteMsg::DepositStake {},
-    )
-    .unwrap();
-    execute(
-        d.branch(),
-        mock_env(),
-        mock_info(ATTESTOR, &[]),
-        ExecuteMsg::Attest {
-            executor: who.into(),
-            eligible: true,
-        },
     )
     .unwrap();
     // Внутри класса честный узел заявляет РОВНО ноль: его вектор
@@ -309,7 +303,12 @@ fn chuzhaya_svyazka_otklonyaetsya() {
 }
 
 #[test]
-fn bez_dopuska_zadanie_ne_vzyat() {
+fn odnoy_registracii_ne_hvataet() {
+    // Прежде этот случай назывался «без допуска»: узел ждал подписи
+    // аттестора. Теперь подписи нет, статус сразу Active — и задание он
+    // всё равно не возьмёт, потому что цепочка требует залог и пробу.
+    // Именно это и есть замена аттестора: условие не исчезло, оно
+    // перестало зависеть от человека.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
     execute(
@@ -336,9 +335,11 @@ fn bez_dopuska_zadanie_ne_vzyat() {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(e.status, ExecutorStatus::Pending);
+    assert_eq!(e.status, ExecutorStatus::Active,
+               "регистрация даёт Active: подтверждать некому");
 
     submit_job(deps.as_mut());
+    // Залога нет — и дальше этого не уйти.
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -346,14 +347,41 @@ fn bez_dopuska_zadanie_ne_vzyat() {
         ExecuteMsg::ClaimJob { job_id: 1 },
     )
     .unwrap_err();
-    assert!(matches!(err, ContractError::ExecutorNotActive { .. }));
+    assert!(matches!(err, ContractError::StakeTooSmall { .. }),
+            "вышло {err:?}");
+    // Залог внесён, но пробы нет — всё равно нет.
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
+        ExecuteMsg::DepositStake {},
+    )
+    .unwrap();
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::ConformanceMissing),
+            "вышло {err:?}");
+    // И только с пробой — да.
+    pass_probe(deps.as_mut(), EXEC, 0);
+    execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 },
+    )
+    .unwrap();
 }
 
 #[test]
 fn korotkiy_otvet_bolshe_ne_otklonyaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     submit_job(deps.as_mut());
     execute(
         deps.as_mut(),
@@ -391,7 +419,7 @@ fn korotkiy_otvet_bolshe_ne_otklonyaetsya() {
 fn ispolnitel_ne_proveryaet_sebya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     let err = execute(
         deps.as_mut(),
@@ -411,7 +439,7 @@ fn ispolnitel_ne_proveryaet_sebya() {
 fn odin_proveryayushchiy_ne_sdast_dvazhdy() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_matching(deps.as_mut(), id, 1);
     let err = execute(
@@ -432,7 +460,7 @@ fn odin_proveryayushchiy_ne_sdast_dvazhdy() {
 fn nepolnoe_okno_ne_svoditsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, 1);
     let err = execute(
@@ -452,7 +480,7 @@ fn nepolnoe_okno_ne_svoditsya() {
 fn podlog_na_samom_nezametnom_lovitsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     // Величина расхождения вердикта НЕ решает, и это главная перемена.
     // Прежде здесь брался минимум измеренного подлога — 37 780, едва над
@@ -497,7 +525,7 @@ fn podlog_na_samom_nezametnom_lovitsya() {
 fn tri_iz_chetyreh_eto_ne_vina() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     // Одна проверка не совпала, другая совпала — правило «не совпало у
     // всех» не срабатывает. Это и есть защита от лгущего проверяющего:
@@ -537,7 +565,7 @@ fn tri_iz_chetyreh_eto_ne_vina() {
 fn hudshee_chestnoe_nablyudenie_ne_obvinyaet() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     // Проверяющие заявляют БОЛЬШИЕ расхождения — 12 700, честное среднее
     // из прежних замеров, и это заведомо выше отменённого порога 36 000
@@ -565,7 +593,7 @@ fn hudshee_chestnoe_nablyudenie_ne_obvinyaet() {
 fn nulevoe_rashozhdenie_pri_chuzhom_heshe_tozhe_vina() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     // Крайний случай с другой стороны: проверяющие заявляют расхождение
     // НОЛЬ, а хэш сдают чужой. Это противоречие — ноль означает
@@ -591,7 +619,7 @@ fn nulevoe_rashozhdenie_pri_chuzhom_heshe_tozhe_vina() {
 fn pyataya_proverka_ne_prinimaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     // Лишние проверки меняли бы долю ложных обвинений, поэтому окно
@@ -615,7 +643,7 @@ fn pyataya_proverka_ne_prinimaetsya() {
 fn zabanennogo_nelzya_vernut() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     execute(
@@ -625,19 +653,9 @@ fn zabanennogo_nelzya_vernut() {
         ExecuteMsg::Finalize { job_id: id },
     )
     .unwrap();
-    // Ни attestor, ни админ не возвращают пойманного: иначе наказание
-    // ничего не стоит.
-    let err = execute(
-        deps.as_mut(),
-        mock_env(),
-        mock_info(ATTESTOR, &[]),
-        ExecuteMsg::Attest {
-            executor: EXEC.into(),
-            eligible: true,
-        },
-    )
-    .unwrap_err();
-    assert!(matches!(err, ContractError::ExecutorBanned));
+    // Админ не возвращает пойманного: иначе наказание ничего не стоит.
+    // Прежде здесь проверялся ещё и аттестор — теперь такой стороны нет
+    // вовсе, и способ вернуть забаненного не остался ни у кого.
     let err = execute(
         deps.as_mut(),
         mock_env(),
@@ -655,13 +673,13 @@ fn zabanennogo_nelzya_vernut() {
 fn prava_razdeleny() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    // attestor не меняет настройки
+    // Настройки — только админ. Посторонний не меняет ничего.
     let err = execute(
         deps.as_mut(),
         mock_env(),
-        mock_info(ATTESTOR, &[]),
+        mock_info("postoronniy", &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None,
+            admin: None,
             checks_required: Some(1),
             pinned_model: None,
             pinned_runtime: None,
@@ -679,7 +697,9 @@ fn prava_razdeleny() {
     )
     .unwrap_err();
     assert!(matches!(err, ContractError::NotAdmin));
-    // админ не подтверждает допуск
+    // А допуск не подтверждает НИКТО, админ в том числе: сообщения для
+    // этого в контракте больше нет. Узел становится Active сам, одной
+    // регистрацией, и дальше всё решают залог и проба.
     execute(
         deps.as_mut(),
         mock_env(),
@@ -693,17 +713,16 @@ fn prava_razdeleny() {
         },
     )
     .unwrap();
-    let err = execute(
-        deps.as_mut(),
-        mock_env(),
-        mock_info(ADMIN, &[]),
-        ExecuteMsg::Attest {
-            executor: EXEC.into(),
-            eligible: true,
-        },
-    )
-    .unwrap_err();
-    assert!(matches!(err, ContractError::NotAttestor));
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.status, ExecutorStatus::Active,
+               "регистрация даёт Active без чьей-либо подписи");
+    // И всё же задание ему не достанется: ни залога, ни пробы.
+    submit_job(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::StakeTooSmall { .. }),
+            "вышло {err:?}");
 }
 
 #[test]
@@ -715,7 +734,6 @@ fn nol_proverok_zapreshchen() {
         mock_info(ADMIN, &[]),
         InstantiateMsg {
             admin: ADMIN.into(),
-            attestor: ATTESTOR.into(),
             checks_required: 0,
             pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(),
@@ -740,7 +758,7 @@ fn nol_proverok_zapreshchen() {
 fn zapros_proverok_schitaet_nesovpadeniya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     // Одна совпала, одна нет — запрос обязан считать НЕСОВПАДЕНИЯ, а не
     // превышения порога: порога больше нет.
@@ -803,7 +821,7 @@ fn pereschyot_rashozhdeniya_sovpadaet_s_zamerom() {
 fn chestnyy_proveryayushchiy_podtverzhdaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let prod: Vec<i64> = (0..100).map(|i| -500_000 - i * 1000).collect();
     let chk: Vec<i64> = prod.iter().map(|x| x - 12_700).collect();
     let id = job_with_commit(deps.as_mut(), &prod);
@@ -828,7 +846,7 @@ fn chestnyy_proveryayushchiy_podtverzhdaetsya() {
 fn vrushchiy_proveryayushchiy_lovitsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let prod: Vec<i64> = (0..100).map(|i| -500_000 - i * 1000).collect();
     let chk: Vec<i64> = prod.iter().map(|x| x - 12_700).collect();
     let id = job_with_commit(deps.as_mut(), &prod);
@@ -856,7 +874,7 @@ fn vrushchiy_proveryayushchiy_lovitsya() {
 fn podmenennyy_vektor_otvergaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let prod: Vec<i64> = (0..100).map(|i| -500_000 - i * 1000).collect();
     let chk: Vec<i64> = prod.iter().map(|x| x - 12_700).collect();
     let id = job_with_commit(deps.as_mut(), &prod);
@@ -886,7 +904,7 @@ fn podmenennyy_vektor_otvergaetsya() {
 fn posle_verdikta_sporit_pozdno() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let prod: Vec<i64> = (0..100).map(|i| -500_000 - i * 1000).collect();
     let chk: Vec<i64> = prod.iter().map(|x| x - 12_700).collect();
     let id = job_with_commit(deps.as_mut(), &prod);
@@ -917,16 +935,15 @@ fn posle_verdikta_sporit_pozdno() {
 fn bez_zaloga_zadanie_ne_vzyat() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    // Зарегистрировался и допущен, но залога не внёс. Проверка залога
-    // стоит при ВЗЯТИИ задания, а не только при допуске.
+    // Зарегистрировался, но залога не внёс. Проверка залога стоит при
+    // ВЗЯТИИ задания, а не только при регистрации: иначе залог можно
+    // забрать сразу после допуска и работать без него.
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
             dtype: DTYPE.into(), card_class: ARCH.into(),
             kernel_cache_hash: CACHE.into(),
         }).unwrap();
-    execute(deps.as_mut(), mock_env(), mock_info(ATTESTOR, &[]),
-        ExecuteMsg::Attest { executor: EXEC.into(), eligible: true }).unwrap();
     submit_job(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
@@ -953,7 +970,7 @@ fn chuzhoy_cw20_ne_oplachivaet() {
 fn zalog_derzhitsya_nezakrytym_zadaniem() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let _ = job_until_answered(deps.as_mut());
     // Иначе залог уходит ровно перед вердиктом.
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -965,7 +982,7 @@ fn zalog_derzhitsya_nezakrytym_zadaniem() {
 fn chestnomu_platyat_a_proveryayushchim_dolyu() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -984,7 +1001,7 @@ fn chestnomu_platyat_a_proveryayushchim_dolyu() {
 fn vinovnomu_ne_platyat_zalog_izymayut() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1006,7 +1023,7 @@ fn proveryayushchim_platyat_nezavisimo_ot_verdikta() {
     for matched in [true, false] {
         let mut deps = mock_dependencies();
         setup(deps.as_mut());
-        register_and_attest(deps.as_mut(), EXEC);
+        register_and_stake(deps.as_mut(), EXEC);
         let id = job_until_answered(deps.as_mut());
         if matched {
             submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
@@ -1027,7 +1044,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
@@ -1035,7 +1052,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
             min_stake: None, verifier_fee_bps: None,
             forfeit: Some(Forfeit::ToAddress(Addr::unchecked("community_pool"))),
         }).unwrap();
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1051,7 +1068,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
 fn dvazhdy_ne_vyplachivaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1067,7 +1084,7 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
     setup(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
@@ -1081,7 +1098,7 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
 fn zabanennyy_zalog_ne_zaberyot() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1105,7 +1122,7 @@ fn zabanennyy_zalog_ne_zaberyot() {
 fn bez_proby_zadanie_ne_vzyat() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    // Зарегистрирован, допущен, залог внесён — всё, кроме пробы.
+    // Зарегистрирован, залог внесён — всё, кроме пробы.
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::RegisterExecutor {
             model: MODEL.into(), runtime: RUNTIME.into(),
@@ -1114,8 +1131,6 @@ fn bez_proby_zadanie_ne_vzyat() {
         }).unwrap();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
         ExecuteMsg::DepositStake {}).unwrap();
-    execute(deps.as_mut(), mock_env(), mock_info(ATTESTOR, &[]),
-        ExecuteMsg::Attest { executor: EXEC.into(), eligible: true }).unwrap();
     submit_job(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
@@ -1207,12 +1222,12 @@ fn uzel_svoego_klassa_probu_prohodit_s_nulyom() {
 fn smena_svyazki_obnulyaet_probu() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     submit_job(deps.as_mut());
     // Порог измерен для связки; сменили связку — все пробы о прежней.
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None, pinned_model: None,
             pinned_runtime: Some("vllm-0.32.0".into()), pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
@@ -1228,11 +1243,11 @@ fn smena_svyazki_obnulyaet_probu() {
 fn smena_etalona_obnulyaet_probu() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     submit_job(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
@@ -1254,11 +1269,11 @@ fn zapis_toy_zhe_svyazki_probu_ne_obnulyaet() {
     // из работы всю сеть до повторного прохождения пробы.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     submit_job(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None, pinned_model: Some(MODEL.into()),
             pinned_runtime: Some(RUNTIME.into()), pinned_dtype: Some(DTYPE.into()),
             conformance_limit_micro: Some(CONF_LIMIT),
@@ -1342,7 +1357,7 @@ fn lyuboe_nenulevoe_rashozhdenie_probu_valit() {
 fn chestnuyu_probu_oproverzhenie_podtverzhdaet() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
         ExecuteMsg::DisputeConformance {
             executor: EXEC.into(),
@@ -1362,7 +1377,7 @@ fn oproverzhenie_podsunutym_etalonom_ne_proydyot() {
     // Иначе обвинить честного можно было бы, подставив другой эталон.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let mut fake = probe_ref();
     fake[0] -= 900_000;
     let err = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1378,7 +1393,7 @@ fn oproverzhenie_podsunutym_etalonom_ne_proydyot() {
 fn oproverzhenie_chuzhimi_vektorami_ispolnitelya_ne_proydyot() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let mut podmena = probe_honest();
     podmena[0] -= 900_000;
     let err = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1424,7 +1439,7 @@ fn pustoy_etalon_ne_prinimaetsya() {
     let mut deps = mock_dependencies();
     let err = instantiate(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         InstantiateMsg {
-            admin: ADMIN.into(), attestor: ATTESTOR.into(),
+            admin: ADMIN.into(),
             checks_required: CHECKS,
             pinned_arch: ARCH.into(), kernel_cache_hash: CACHE.into(),
     pinned_model: MODEL.into(),
@@ -1444,7 +1459,7 @@ fn zabanennyy_probu_ne_sdast() {
     // Иначе пойманный на подлоге сдаёт пробу заново и возвращается.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1464,7 +1479,7 @@ fn proveryayushchiy_bez_proby_ne_prinimaetsya() {
     // не спасает: четыре неверно настроенных вынесут вердикт согласованно.
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info("nobody", &[]),
         ExecuteMsg::SubmitCheck {
@@ -1477,13 +1492,13 @@ fn proveryayushchiy_bez_proby_ne_prinimaetsya() {
 fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
     let mut deps = mock_dependencies();
     setup(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = job_until_answered(deps.as_mut());
     register_and_probe(deps.as_mut(), "checker0");
     // Сменили эталон — проба проверяющего больше не о действующей настройке.
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
@@ -1520,7 +1535,6 @@ fn setup_native(deps: DepsMut) {
         mock_info(ADMIN, &[]),
         InstantiateMsg {
             admin: ADMIN.into(),
-            attestor: ATTESTOR.into(),
             checks_required: CHECKS,
             pinned_model: MODEL.into(),
             pinned_runtime: RUNTIME.into(),
@@ -1650,7 +1664,7 @@ fn rodnoy_platyozh_pri_raschyote_cw20_ne_prinimaetsya() {
 fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1683,7 +1697,7 @@ fn rodnye_vyplaty_idut_bankmsg_i_summy_te_zhe() {
 fn rodnoy_vozvrat_zakazchiku_pri_podloge() {
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1705,7 +1719,7 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
     setup(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
@@ -1809,7 +1823,6 @@ fn listy_klassov_otlichayutsya_tolko_klassom() {
         assert_eq!(m.conformance_lens, base.conformance_lens,
                    "{arch}: тексты пробы у классов одни и те же");
         assert_eq!(m.admin, base.admin, "{arch}: админ");
-        assert_eq!(m.attestor, base.attestor, "{arch}: аттестор");
     }
     // Предел нулевой у ВСЕХ: класс меняет эталон, а не строгость.
     for (m, (_, arch, _, _)) in razobrannye.iter().zip(listy.iter()) {
@@ -1890,7 +1903,7 @@ fn nulevaya_cena_otvergaetsya() {
 fn ispolnitel_poluchaet_cenu_celikom() {
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1909,11 +1922,11 @@ fn povyshenie_doli_ne_urezaet_vyruchku_ispolnitelya() {
     // пересчитывается по новой доле.
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None, checks_required: None,
+            admin: None, checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None,
@@ -1938,7 +1951,7 @@ fn dolya_delitsya_vverh_a_ostatok_vozvrashchaetsya_zakazchiku() {
     // проверку, проверка её не получила — оставлять исполнителю не за что.
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &coins(2, NATIVE)),
         ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
             price: Uint128::one() }).unwrap();
@@ -1973,7 +1986,7 @@ fn pri_podloge_zakazchiku_vozvrashchaetsya_cena_a_ne_vsyo() {
     // Проверяющим платят независимо от вердикта: они работу сделали.
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
-    register_and_attest(deps.as_mut(), EXEC);
+    register_and_stake(deps.as_mut(), EXEC);
     let id = native_job_until_answered(deps.as_mut());
     submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
     let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
@@ -1995,7 +2008,7 @@ fn administratora_mozhno_smenit() {
     let new_admin = "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67";
     execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: Some(new_admin.into()), attestor: None,
+            admin: Some(new_admin.into()),
             checks_required: None,
             pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None,
@@ -2006,7 +2019,7 @@ fn administratora_mozhno_smenit() {
     // Прежний администратор больше ничего не правит.
     let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None,
+            admin: None,
             checks_required: Some(1), pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
@@ -2017,11 +2030,148 @@ fn administratora_mozhno_smenit() {
     // А новый — правит.
     execute(deps.as_mut(), mock_env(), mock_info(new_admin, &[]),
         ExecuteMsg::UpdateConfig {
-            admin: None, attestor: None,
+            admin: None,
             checks_required: Some(3), pinned_arch: None, kernel_cache_hash: None,
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             settlement: None, stake_denom: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
+}
+
+// --- перенос на новый код -------------------------------------------------
+//
+// Добавлено 26 октября вместе с точкой входа. Проверяется ровно то, что
+// будет сделано на живой цепочке: в хранилище лежат октябрьские
+// настройки с `attestor` и БЕЗ записи о версии, и перенос обязан
+// превратить их в нынешние, ничего больше не тронув.
+
+/// Записать в хранилище настройки ПРЕЖНЕЙ формы — так, как они лежат у
+/// трёх развёрнутых экземпляров. Версия нарочно не пишется: октябрьский
+/// код её не писал.
+fn put_v1_config(deps: DepsMut) {
+    let v1 = serde_json::json!({
+        "admin": ADMIN,
+        "attestor": "attestor",
+        "checks_required": CHECKS,
+        "pinned_model": MODEL,
+        "pinned_runtime": RUNTIME,
+        "pinned_dtype": DTYPE,
+        "pinned_arch": ARCH,
+        "kernel_cache_hash": CACHE,
+        "conformance_limit_micro": CONF_LIMIT,
+        "conformance_ref_hash": commit_hash(&probe_ref()),
+        "conformance_lens": PROBE_LENS.to_vec(),
+        "conformance_version": 1,
+        "settlement": {"native": STAKE},
+        "stake_denom": STAKE,
+        "min_stake": MIN_STAKE.to_string(),
+        "verifier_fee_bps": FEE_BPS,
+        "forfeit": {"to_address": "forfeit_address"},
+    });
+    deps.storage
+        .set(b"config", serde_json::to_vec(&v1).unwrap().as_slice());
+}
+
+#[test]
+fn perenos_sbrasyvaet_attestora_i_hranit_ostalnoe() {
+    let mut deps = mock_dependencies();
+    put_v1_config(deps.as_mut());
+    assert!(STATE_VERSION.may_load(deps.as_ref().storage).unwrap().is_none(),
+            "у октябрьского хранилища записи о версии нет");
+
+    let res = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "from" && a.value == "1"));
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "changed" && a.value == "attestor_dropped"));
+    assert_eq!(
+        STATE_VERSION.load(deps.as_ref().storage).unwrap(),
+        CURRENT_VERSION
+    );
+
+    // Настройки читаются нынешней формой, и всё, кроме аттестора, цело.
+    let cfg: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.admin, Addr::unchecked(ADMIN));
+    assert_eq!(cfg.checks_required, CHECKS);
+    assert_eq!(cfg.pinned_arch, ARCH);
+    assert_eq!(cfg.kernel_cache_hash, CACHE);
+    assert_eq!(cfg.conformance_limit_micro, CONF_LIMIT);
+    assert_eq!(cfg.conformance_ref_hash, commit_hash(&probe_ref()));
+    assert_eq!(cfg.conformance_lens, PROBE_LENS.to_vec());
+    // Версия пробы НЕ сбрасывается переносом: выданные пробы остаются
+    // действительными, иначе перенос вышиб бы из сети всех честных узлов.
+    assert_eq!(cfg.conformance_version, 1);
+    assert_eq!(cfg.min_stake, Uint128::new(MIN_STAKE));
+    assert_eq!(cfg.verifier_fee_bps, FEE_BPS);
+    assert!(matches!(cfg.forfeit, Forfeit::ToAddress(_)));
+}
+
+#[test]
+fn povtornyy_perenos_bezvreden() {
+    // Отправить перенос дважды — обычное дело: первая отправка могла
+    // потеряться в сети. Вторая обязана ничего не менять, а не падать.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let before: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    let res = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+    assert!(res
+        .attributes
+        .iter()
+        .any(|a| a.key == "changed" && a.value == "nothing"));
+    let after: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(before, after, "повторный перенос настроек не тронул");
+}
+
+#[test]
+fn perenos_nazad_i_v_neizvestnoe_otvergaetsya() {
+    // Код не берётся переносить форму, которой не знает: откат на старый
+    // код после правки хранилища испортил бы настройки молча.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    STATE_VERSION
+        .save(deps.as_mut().storage, &(CURRENT_VERSION + 1))
+        .unwrap();
+    let err = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap_err();
+    assert!(matches!(err, ContractError::MigrateBackwards { .. }), "вышло {err:?}");
+}
+
+#[test]
+fn perenos_bez_nastroek_otkazyvaetsya() {
+    // Пустое хранилище — не повод что-то придумывать.
+    let mut deps = mock_dependencies();
+    let err = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap_err();
+    assert!(matches!(err, ContractError::MigrateNoConfig), "вышло {err:?}");
+}
+
+#[test]
+fn perenos_ne_tronul_ispolnitelya_i_zadaniya() {
+    // Переносится только форма настроек. Исполнители, их залоги, пробы и
+    // открытые задания обязаны остаться как были — иначе перенос стоил бы
+    // сети всей работы, идущей в этот момент.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    let e_before: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    let j_before: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: id }).unwrap()).unwrap();
+
+    migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+
+    let e_after: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    let j_after: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: id }).unwrap()).unwrap();
+    assert_eq!(e_before, e_after, "исполнитель цел");
+    assert_eq!(j_before, j_after, "задание цело");
+    // И задание доводится до конца уже после переноса.
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
+    execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
 }

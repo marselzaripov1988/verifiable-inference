@@ -1,6 +1,5 @@
 {
  "admin": "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67",
- "attestor": "axm1e4r6zyrwj5xltetdm0eap5zxldh577lh564l67",
  "checks_required": 2,
  "pinned_model": "Qwen/Qwen2.5-7B-Instruct",
  "pinned_runtime": "vllm-0.31.0",
