@@ -13,14 +13,14 @@
 
 ЧТО ЗДЕСЬ ВАЖНО ЗНАТЬ.
 
-**Задания ищутся перебором номеров.** Не от лени: у контракта нет запроса
-списка. В `QueryMsg` только `Job{job_id}`, а счётчик `NEXT_JOB` снаружи
-не виден. Поэтому петля идёт по номерам от своей отметки и
-останавливается на отсутствующем. Номера сплошные — `CancelJob` запись не
-удаляет, а переводит в `Settled`, — так что дыр в середине не бывает.
-Цена: один запрос на задание за цикл. Это стоит поправить в контракте
-(запрос `Jobs` или хотя бы `NextJob`), и до тех пор отметка `from_id`
-хранится в файле состояния, чтобы не перечитывать закрытое.
+**Задания берутся запросом списка, а при старом контракте — перебором.**
+Запрос `Jobs` появился 27 октября; до него в `QueryMsg` был только
+`Job{job_id}`, счётчик `NEXT_JOB` снаружи не виден, и петля шла по
+номерам от своей отметки, останавливаясь на отсутствующем. Перебор
+остался — не из вежливости к старому коду, а потому что перенос трёх
+живых адресов делается не мгновенно, и в это время узел обязан работать.
+Какой путь взят, петля говорит вслух. Номера сплошные в обоих случаях —
+`CancelJob` запись не удаляет, а переводит в `Settled`.
 
 **Отсутствие задания и недоступность цепочки — разные вещи.** Если их
 смешать, упавший REST выглядит концом списка, и петля тихо простоит всю
@@ -33,6 +33,13 @@
 `answer_hash`, и поэтому доставка не требует доверия — требует лишь того,
 чтобы кто-то отдавал. Отсюда и `--prompts`/`--peers` списком: пробуется
 каждый, берётся первый сошедшийся с цепочкой.
+
+**Где искать — теперь говорит сама цепочка.** У задания есть
+`prompt_uri` (назвал заказчик), у записи узла — `endpoint` (назвал узел).
+Оба спрашиваются первыми, а `--prompts` и `--peers` остаются за ними: до
+27 октября адреса передавались людьми, и узел, которому не сказали адрес
+соседа, не мог проверить его ответ. Доверия это не прибавляет ни на
+сколько — всё так же решает хэш; это лишь первое место, куда смотреть.
 
 **Один залог — одно задание за раз.** Карта одна. Взяв второе, узел
 просрочит оба, и оба у него отберут.
@@ -47,8 +54,8 @@
 
     python3 loop.py --rest https://axm-lcd.trickle.pro \\
         --contract axm1… --base-url http://127.0.0.1:8000/v1 \\
-        --key node1 --prompts ./prompts --bundles ./bundles \\
-        --peers http://сосед:8080 --once
+        --key node1 --bundles ./bundles \\
+        --endpoint http://мой-адрес:8081 --once
 
 С отправкой добавить `--send`. Без `--once` крутится с паузой
 `--every` секунд.
@@ -93,6 +100,47 @@ def scan_jobs(rest, contract, from_id, max_scan=200, miss_streak=2):
             jobs[job_id] = job
         job_id += 1
     return jobs
+
+
+def jobs_listed(rest, contract, from_id, max_scan=200, page=50):
+    """Задания от `from_id` ЗАПРОСОМ СПИСКА. (задания, граница).
+
+    Страницами, потому что страница ограничена сверху контрактом (50): за
+    одну историю в тысячу заданий не вытащить, а узел, у которого отметка
+    потерялась, читает с начала.
+
+    `QueryUnknown` летит наружу: решать, чем заменить незнакомый запрос,
+    не здесь.
+    """
+    jobs, border = {}, None
+    after = int(from_id) - 1
+    after = after if after > 0 else None
+    while len(jobs) < int(max_scan):
+        want = min(int(page), int(max_scan) - len(jobs))
+        got, border = chain.jobs_page(rest, contract, after, want)
+        for e in got:
+            jobs[int(e["job_id"])] = e["job"]
+        if not got:
+            break
+        after = int(got[-1]["job_id"])
+        if after + 1 >= border:
+            break
+    return jobs, border
+
+
+def snapshot(rest, contract, from_id, max_scan=200):
+    """Снимок заданий от отметки: (задания, граница, чем добыто).
+
+    Граница None означает, что контракт запроса списка не знает и задания
+    найдены перебором. Это не ошибка и не повод останавливаться: перенос
+    трёх живых адресов не мгновенный, и узел обязан работать всё это
+    время.
+    """
+    try:
+        jobs, border = jobs_listed(rest, contract, from_id, max_scan)
+        return jobs, border, "список"
+    except chain.QueryUnknown:
+        return scan_jobs(rest, contract, from_id, max_scan), None, "перебор"
 
 
 def state_of(job):
@@ -242,7 +290,11 @@ def allowed_roles(params, record, roles):
         от прошедшего пробу так же, как `claim_job`;
       * недобор залога закрывает только исполнителя: с проверяющего
         контракт залога не требует вовсе, и запрещать ему работать значило
-        бы терять проверки на узле, которому просто нечего ставить.
+        бы терять проверки на узле, которому просто нечего ставить;
+      * необъявленный адрес доставки — тоже только исполнителя, и ровно
+        по той же причине: связка нужна ОТ исполнителя. Контракт с 27
+        октября отвергает `claim_job` без адреса, так что без этой
+        проверки узел платил бы газ за отказ каждый цикл.
 
     Сроки и сведение остаются доступны при любом исходе: их вправе
     вызвать кто угодно, и ничего из проверенного здесь для них не нужно.
@@ -259,6 +311,13 @@ def allowed_roles(params, record, roles):
         return (tuple(r for r in roles if r != "executor"),
                 [f"залог {have} меньше нужного {params.min_stake} "
                  f"{params.stake_denom}: заданий не взять, проверять можно"])
+    # Адрес доставки проверяется ТАК ЖЕ, как залог, и по той же причине:
+    # контракт его требует при взятии, а причина отвергнутой сделки
+    # оператору не видна — видна только списанная плата за газ.
+    if not (record or {}).get("endpoint"):
+        return (tuple(r for r in roles if r != "executor"),
+                ["адрес доставки не объявлен: связку взять негде, заданий "
+                 "не дадут. Отправьте set_endpoint — проверять можно и так"])
     return tuple(roles), []
 
 
@@ -271,7 +330,7 @@ class Loop:
                  dtype="bfloat16", roles=("executor", "checker"),
                  bundles=None, prompts=(), peers=(), state_path=None,
                  min_left=0, max_checks=1, max_scan=200, max_tokens=200,
-                 skip_expired=False, out=None):
+                 skip_expired=False, endpoint=None, out=None):
         self.rest = rest
         self.contract = contract
         self.sender = sender
@@ -288,8 +347,13 @@ class Loop:
         self.max_scan = max_scan
         self.max_tokens = max_tokens
         self.skip_expired = skip_expired
+        self.endpoint = endpoint
         self.out = out if out is not None else sys.stderr
         self.state = load_state(state_path)
+        #: Адреса доставки чужих узлов, прочитанные в этом цикле. Кеш на
+        #: цикл, а не навсегда: адрес меняется, и узел, переехавший между
+        #: циклами, иначе остался бы недостижимым до перезапуска.
+        self.endpoints = {}
 
     def say(self, s):
         print(s, file=self.out)
@@ -301,23 +365,80 @@ class Loop:
 
     # --- источники --------------------------------------------------------
 
-    def prompt_sources(self):
-        """Где искать запрос: сперва свои каталоги, потом соседи.
+    def prompt_sources(self, job=None):
+        """Где искать запрос: адрес из задания, свои каталоги, соседи.
 
-        Соседи тоже годятся: запрос сверяется с `prompt_hash`, и отдать
-        его может кто угодно.
+        Адрес из задания первым — его назвал заказчик, он и обязался
+        отдавать. Остальные за ним: запрос сверяется с `prompt_hash`, и
+        отдать его может кто угодно, так что молчащий адрес заказчика не
+        обязан стоить задания.
         """
-        return tuple(self.prompts) + tuple(self.peers)
+        mine = tuple(self.prompts) + tuple(self.peers)
+        return delivery.sources_with((job or {}).get("prompt_uri"), mine)
 
-    def bundle_sources(self):
-        """Где искать связку: у соседей и в своём каталоге.
+    def bundle_sources(self, job=None):
+        """Где искать связку: адрес исполнителя, соседи, свой каталог.
+
+        Адрес исполнителя спрашивается у цепочки по его записи — до 27
+        октября его негде было взять, и узел, которому не назвали соседа,
+        не мог проверить чужой ответ.
 
         Свой каталог последним и не напрасно: по заданию, которое мы же
         исполняли, связка лежит у нас, и проверять её нам всё равно
         нельзя — контракт отвергнет самопроверку. Но каталог бывает общим
         на несколько узлов.
         """
-        return tuple(self.peers) + ((self.bundles,) if self.bundles else ())
+        mine = tuple(self.peers) + ((self.bundles,) if self.bundles else ())
+        return delivery.sources_with(self.endpoint_of(job), mine)
+
+    def announce_endpoint(self, record):
+        """Привести адрес в цепочке к своему. Возвращает свежую запись.
+
+        Зачем это петле, а не только оператору. Адрес меняется чаще
+        всего прочего: карта переарендована, машина переехала, порт
+        другой. Узел, у которого в цепочке записан прежний адрес, выглядит
+        исправным и берёт задания — а связку у него не забрать, и его
+        ответ не проверят. Петля знает свой адрес из флага, то есть видит
+        расхождение сразу, и сделка уходит ТОЛЬКО при расхождении.
+
+        Молчание тоже законно: без `--endpoint` петля ничего не объявляет
+        и не переписывает объявленное оператором.
+        """
+        if not self.endpoint:
+            return None
+        have = (record or {}).get("endpoint")
+        if have == self.endpoint:
+            return None
+        if record is None:
+            self.say("адрес не объявить: узел не зарегистрирован в контракте")
+            return None
+        self.say(f"адрес доставки: в цепочке {have or 'нет'}, у нас "
+                 f"{self.endpoint} — объявляем")
+        try:
+            self.sender.send({"set_endpoint": {"endpoint": self.endpoint}})
+        except tx.TxFailed as e:
+            self.say(f"  адрес не объявлен: {str(e).splitlines()[0][:160]}")
+            return None
+        return chain.load_executor(self.rest, self.contract,
+                                   self.sender.address())
+
+    def endpoint_of(self, job):
+        """Адрес исполнителя задания. Спрашивается раз за цикл на узел.
+
+        Недоступность цепочки здесь НЕ останавливает проверку: адрес
+        всего лишь первый источник, а остальные никуда не делись.
+        """
+        who = (job or {}).get("executor")
+        if not who:
+            return None
+        if who not in self.endpoints:
+            try:
+                self.endpoints[who] = chain.endpoint_of(
+                    self.rest, self.contract, who)
+            except chain.ChainUnavailable as e:
+                self.say(f"  адрес узла {who} не прочитан: {e}")
+                self.endpoints[who] = None
+        return self.endpoints[who]
 
     # --- действия ---------------------------------------------------------
 
@@ -349,7 +470,7 @@ class Loop:
                          f"считаем заново")
 
         raw, src, why = delivery.fetch_verified(
-            self.prompt_sources(),
+            self.prompt_sources(job),
             (f"{job.get('prompt_hash')}.txt", f"{int(job_id)}.txt"),
             delivery.prompt_check(job))
         if raw is None:
@@ -384,7 +505,8 @@ class Loop:
     def do_check(self, job_id, job, params, now, record=None):
         """Достать связку, оценить ту же пару и собрать `submit_check`."""
         raw, src, why = delivery.fetch_verified(
-            self.bundle_sources(), f"{int(job_id)}.json", delivery.bundle_check(job))
+            self.bundle_sources(job), f"{int(job_id)}.json",
+            delivery.bundle_check(job))
         if raw is None:
             self.say(f"  {job_id}: связка не получена ни откуда — проверять "
                      f"нечего")
@@ -415,6 +537,10 @@ class Loop:
         now = chain.chain_time(self.rest)
         me = self.sender.address()
         record = chain.load_executor(self.rest, self.contract, me)
+        self.endpoints = {}
+        fresh = self.announce_endpoint(record)
+        if fresh is not None:
+            record = fresh
 
         roles, blocked = allowed_roles(params, record, self.roles)
         for b in blocked:
@@ -425,8 +551,23 @@ class Loop:
             self.say("своей работы не будет; остаются сроки и сведение")
 
         from_id = self.state["from_id"]
-        jobs = scan_jobs(self.rest, self.contract, from_id, self.max_scan)
-        if from_id > 1 and not jobs:
+        jobs, border, how = snapshot(self.rest, self.contract, from_id,
+                                     self.max_scan)
+        if border is not None and from_id > border:
+            # Отметка ЗА границей списка. С запросом `NextJob` это видно
+            # прямо, а не по косвенным признакам: такого номера контракт
+            # ещё не выдавал, значит файл состояния приехал с другой сети
+            # или с соседа.
+            self.say(f"отметка {from_id} за границей списка ({border}) — "
+                     f"смотрим с начала")
+            from_id = 1
+            self.state["from_id"] = 1
+            jobs, border, how = snapshot(self.rest, self.contract, 1,
+                                         self.max_scan)
+        if border is None and from_id > 1 and not jobs:
+            # То же самое, но для контракта БЕЗ запроса списка: границы
+            # нет, и приходится судить по косвенному признаку.
+            #
             # Отметка может указывать ЗА КРАЙ цепочки: файл состояния
             # переехал с другой сети, был восстановлен из копии или
             # скопирован с соседа. Тогда узел слеп ко всем заданиям ниже
@@ -454,7 +595,9 @@ class Loop:
             if state_of(job) == "answered":
                 checks[job_id] = chain.checks_of(self.rest, self.contract,
                                                  job_id)
-        self.say(f"заданий с {from_id}: {len(jobs)}, время цепочки {now}")
+        edge = f", граница {border}" if border is not None else ""
+        self.say(f"заданий с {from_id}: {len(jobs)} ({how}{edge}), "
+                 f"время цепочки {now}")
 
         acts = plan(jobs, checks, me, params, now, roles,
                     self.min_left, self.max_checks)
@@ -539,6 +682,9 @@ def main():
                    help="где искать связки соседей: каталог или http(s)")
     p.add_argument("--bundles", help="куда класть свои связки. Их же отдают "
                                      "соседям: python3 -m http.server")
+    p.add_argument("--endpoint", help="свой адрес доставки, http(s). Если в "
+                                      "цепочке записан другой, петля объявит "
+                                      "этот")
     p.add_argument("--state", help="файл с отметкой просмотра")
     p.add_argument("--every", type=int, default=30,
                    help="пауза между циклами, секунды")
@@ -592,15 +738,22 @@ def main():
         print("ВНИМАНИЕ: --bundles не задан: связку негде взять "
               "проверяющим, задание закроется сроком", file=sys.stderr)
     if "executor" in roles and not a.prompts and not a.peers:
-        print("ВНИМАНИЕ: ни --prompts, ни --peers: текст запроса брать "
-              "негде, работать будет нечем", file=sys.stderr)
+        # Уже не отказ и даже не беда: адрес текста лежит в самом задании
+        # (`prompt_uri`), и его назвал заказчик. Свои источники остаются
+        # запасом на случай, когда его адрес молчит.
+        print("без --prompts и --peers: запрос будет браться только по "
+              "адресу из задания", file=sys.stderr)
+    if "executor" in roles and not a.endpoint:
+        print("ВНИМАНИЕ: --endpoint не задан: петля не объявит адрес "
+              "доставки, и если он не объявлен в цепочке, заданий не дадут",
+              file=sys.stderr)
 
     loop = Loop(a.rest, a.contract, sender, a.base_url, a.model,
                 dtype=a.dtype, roles=roles, bundles=a.bundles,
                 prompts=a.prompts, peers=a.peers, state_path=a.state,
                 min_left=a.min_time_left, max_checks=a.max_checks,
                 max_scan=a.max_scan, max_tokens=a.max_tokens,
-                skip_expired=a.skip_expired)
+                skip_expired=a.skip_expired, endpoint=a.endpoint)
     print(f"узел {me}, роли {'+'.join(roles)}", file=sys.stderr)
 
     # Подряд неразобранных отказов. Один такой не должен убивать узел:

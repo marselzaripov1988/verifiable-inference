@@ -16,7 +16,12 @@
   * **«ответ сдан» и «ответ подтверждён» — не одно и то же.** Склей их, и
     заказчик примет непроверенное за проверенное;
   * **взятое задание не отменяется.** Иначе заказчик забирал бы деньги у
-    работающего узла.
+    работающего узла;
+  * **адрес текста обязателен, и отказ приходит ДО сделки.** Контракт с
+    27 октября требует `prompt_uri`; узнать об этом из списанного газа —
+    худший способ;
+  * **адрес исполнителя заказчик спрашивает у цепочки**, а не у людей, и
+    доверия это ему не даёт: связка сверяется с обоими хэшами задания.
 
 Запуск:  python protocol/daemon/test_client.py
 """
@@ -53,6 +58,10 @@ CFG = {
     "claim_ttl_seconds": 600, "check_ttl_seconds": 3600,
 }
 
+#: Адрес, по которому заказчик отдаёт запрос. Доверия не требует: текст
+#: сверяется с `prompt_hash`.
+URI = "http://client.example:8080"
+
 REAL_QUERY = chain.query_smart
 
 
@@ -88,27 +97,29 @@ def test_summa():
 def test_soobshenie():
     print("\n### сообщение: родной расчёт и CW20 — разные пути")
     p = params()
-    msg, funds, to = client.submit_message(p, "ph", 1_000_000)
+    msg, funds, to = client.submit_message(p, "ph", 1_000_000, URI)
     ok(set(msg) == {"submit_job"}, "родной расчёт: submit_job реестру")
-    ok(msg["submit_job"] == {"prompt_hash": "ph", "price": "1000000"},
+    ok(msg["submit_job"] == {"prompt_hash": "ph", "prompt_uri": URI,
+                             "price": "1000000"},
        "поля ровно те, что ждёт контракт")
     ok(funds == "1048500uaxm", f"монеты идут с транзакцией (вышло {funds})")
     ok(to is None, "получатель — сам реестр")
 
     pc = params(dict(CFG, settlement={"cw20": "axm1token"}))
-    msg, funds, to = client.submit_message(pc, "ph", 1_000_000)
+    msg, funds, to = client.submit_message(pc, "ph", 1_000_000, URI)
     ok(to == "axm1token", "CW20: сообщение идёт НА ТОКЕН")
     ok(funds is None, "при CW20 родных монет с транзакцией нет")
     ok(set(msg) == {"send"} and msg["send"]["amount"] == "1048500",
        "это send, и сумма в нём")
     import base64
     hook = json.loads(base64.b64decode(msg["send"]["msg"]))
-    ok(hook == {"submit_job": {"prompt_hash": "ph", "price": "1000000"}},
-       "вложенное сообщение — то же submit_job")
+    ok(hook == {"submit_job": {"prompt_hash": "ph", "prompt_uri": URI,
+                               "price": "1000000"}},
+       "вложенное сообщение — то же submit_job, с тем же адресом текста")
 
     try:
         client.submit_message(params(dict(CFG, settlement={"бред": 1})),
-                              "ph", 1)
+                              "ph", 1, URI)
         ok(False, "неизвестный расчёт должен отвергаться")
     except chain.ChainUnavailable:
         ok(True, "неизвестный вид расчёта — отказ, а не догадка")
@@ -141,7 +152,7 @@ def test_vykladka_do_otpravki():
             f.write(prompt)
         a = argparse.Namespace(
             prompt_file=pf, prompt=None, price=1_000_000, prompts=d,
-            contract="axm1reg")
+            prompt_uri=URI, contract="axm1reg")
         rc = client.cmd_submit(a, p, Sender())
         ok(rc == 0, "submit отработал")
         ok(seen.get("был_файл") is True,
@@ -153,6 +164,59 @@ def test_vykladka_do_otpravki():
             ok(f.read() == prompt, "файл побайтово тот же: хвост не дописан")
         ok(os.path.exists(os.path.join(d, "7.txt")),
            "после отправки появилось и имя по номеру — для человека")
+
+
+def test_adres_teksta_obyazatelen():
+    print("\n### submit без адреса текста — отказ, а не отвергнутая сделка")
+    p = params()
+
+    class Sender:
+        def __init__(self):
+            self.sent = []
+
+        def address(self):
+            return "axm1client"
+
+        def send(self, msg, funds=None, contract=None):
+            self.sent.append(msg)
+            return {"txhash": "AB", "code": 0, "tx": {}}
+
+    s = Sender()
+    a = argparse.Namespace(prompt_file=None, prompt="вопрос", price=1000,
+                           prompts=None, prompt_uri=None, contract="axm1reg")
+    ok(client.cmd_submit(a, p, s) == 2, "без --prompt-uri — отказ")
+    ok(s.sent == [], "и сделка не отправлена: газ не потрачен")
+
+
+def test_adres_ispolnitelya_iz_tsepochki():
+    print("\n### связку заказчик ищет по адресу исполнителя ИЗ ЦЕПОЧКИ")
+    saved = chain.query_smart
+    try:
+        chain.query_smart = lambda r, c, q, timeout=20: {
+            "status": "active", "endpoint": "http://node1:8081"}
+        job = {"executor": "axm1node", "answer_hash": "a"}
+        srcs = client.answer_sources("http://r", "axm1c", job,
+                                     ["http://zerkalo"])
+        ok(srcs[0] == "http://node1:8081",
+           f"адрес исполнителя первым (вышло {srcs})")
+        ok("http://zerkalo" in srcs, "названное заказчиком остаётся запасом")
+
+        # Адрес не объявлен — остаются свои источники, а не отказ.
+        chain.query_smart = lambda r, c, q, timeout=20: {"status": "active"}
+        ok(client.answer_sources("http://r", "axm1c", job, ["./mirror"])
+           == ("./mirror",), "без адреса работают свои источники")
+
+        # Цепочка не ответила — тоже не повод падать: сверка всё равно
+        # по хэшам, а источники названы заказчиком.
+        def broken(r, c, q, timeout=20):
+            raise chain.ChainUnavailable("502")
+
+        chain.query_smart = broken
+        ok(client.answer_sources("http://r", "axm1c", job, ["./mirror"])
+           == ("./mirror",),
+           "недоступная цепочка не отменяет своих источников")
+    finally:
+        chain.query_smart = saved
 
 
 def test_otvet_ne_na_slovo():
@@ -247,6 +311,8 @@ def main():
     test_summa()
     test_soobshenie()
     test_vykladka_do_otpravki()
+    test_adres_teksta_obyazatelen()
+    test_adres_ispolnitelya_iz_tsepochki()
     test_otvet_ne_na_slovo()
     test_verdikt_otdelno_ot_otveta()
     test_otmena()

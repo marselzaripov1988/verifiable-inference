@@ -30,6 +30,17 @@ class ChainUnavailable(Exception):
     """Параметры из цепочки получить не удалось."""
 
 
+class QueryUnknown(ChainUnavailable):
+    """Контракт такого запроса НЕ ЗНАЕТ: его код старее кода демона.
+
+    Отдельно от недоступности затем, что ответ разный. Недоступность —
+    повод подождать; незнакомый запрос ждать бессмысленно, зато есть что
+    сделать вместо него. Так демон работает и с перенесённым контрактом,
+    и с ещё не перенесённым, не требуя от оператора знать, какой перед
+    ним.
+    """
+
+
 @dataclass(frozen=True)
 class Params:
     """Параметры протокола. Единственный источник — цепочка."""
@@ -189,10 +200,11 @@ def load_job(rest, contract, job_id):
 
 #: Чем «задания с таким номером нет» отличается от «цепочка не ответила».
 #:
-#: Различать обязательно, и это не придирка. У контракта НЕТ запроса списка
-#: заданий: в QueryMsg только `Job{job_id}`, а счётчик `NEXT_JOB` снаружи
-#: не виден. Значит петля ищет задания перебором номеров и останавливается
-#: на отсутствующем. Если считать отсутствием любую ошибку, то недоступный
+#: Различать обязательно, и это не придирка. Запрос списка (`Jobs`,
+#: `NextJob`) появился у контракта 27 октября, но код до переноса его не
+#: знает — а перенос трёх живых адресов дело не одной минуты. Пока он не
+#: сделан, петля ищет задания перебором номеров и останавливается на
+#: отсутствующем. Если считать отсутствием любую ошибку, то недоступный
 #: REST выглядел бы концом списка — петля решила бы, что заданий нет, и
 #: тихо простояла бы всю неисправность.
 #:
@@ -216,6 +228,66 @@ def job_or_none(rest, contract, job_id):
         if "not found" in s.lower() and JOB_MISSING.search(s):
             return None
         raise
+
+
+#: Чем «такого запроса в контракте нет» отличается от всего остального.
+#:
+#: Так выглядит отказ разбора сообщения в cosmwasm: запрос приходит JSON-ом,
+#: и незнакомый вариант отвергается serde ещё до кода контракта. Текст
+#: похож на «Error parsing into type …QueryMsg: unknown variant `jobs`».
+UNKNOWN_QUERY = re.compile(
+    r"unknown variant|unknown field|Error parsing into type", re.I)
+
+
+def jobs_page(rest, contract, start_after=None, limit=None):
+    """Страница списка заданий. Возвращает (записи, граница).
+
+    Граница — номер, который получит следующее задание, то есть конец
+    списка. Приходит тем же ответом нарочно: иначе каждый цикл узла стоил
+    бы двух запросов вместо одного.
+
+    `QueryUnknown` — контракт запроса не знает (код до переноса). Это не
+    поломка: вызывающий переходит на перебор номеров.
+    """
+    q = {"jobs": {}}
+    if start_after is not None:
+        q["jobs"]["start_after"] = int(start_after)
+    if limit is not None:
+        q["jobs"]["limit"] = int(limit)
+    try:
+        d = query_smart(rest, contract, q)
+    except ChainUnavailable as e:
+        if UNKNOWN_QUERY.search(str(e)):
+            raise QueryUnknown(str(e)) from e
+        raise
+    if "next_job" not in d:
+        raise ChainUnavailable(f"в ответе списка нет границы: {d!r}")
+    return list(d.get("jobs") or []), int(d["next_job"])
+
+
+def next_job(rest, contract):
+    """Номер следующего задания, то есть граница списка."""
+    try:
+        d = query_smart(rest, contract, {"next_job": {}})
+    except ChainUnavailable as e:
+        if UNKNOWN_QUERY.search(str(e)):
+            raise QueryUnknown(str(e)) from e
+        raise
+    return int(d["next_job"])
+
+
+def endpoint_of(rest, contract, address):
+    """Адрес, по которому узел отдаёт связки. None — не объявлен.
+
+    Это адрес, а не доверие: что по нему лежит, решает сверка с хэшами
+    задания. Поэтому брать связку можно и не отсюда, а отсюда — в первую
+    очередь.
+    """
+    rec = load_executor(rest, contract, address)
+    if not rec:
+        return None
+    e = rec.get("endpoint")
+    return e or None
 
 
 def text_hash(text):

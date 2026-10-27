@@ -20,7 +20,9 @@
 
 **Ответ не берётся на слово.** Он приходит вне цепочки, и заказчик
 сверяет его с `answer_hash` из задания прежде, чем показать. Источников
-список: исполнитель, сосед, зеркало — доверия не требует ни один.
+список: исполнитель, сосед, зеркало — доверия не требует ни один. Адрес
+исполнителя заказчик СПРАШИВАЕТ У ЦЕПОЧКИ (`endpoint` в его записи), а не
+у людей; `--peers` остаётся запасом.
 
 **Вердикт показывается отдельно от ответа.** «Ответ получен» и «ответ
 подтверждён проверяющими» — разные вещи: до `settled` ответ есть, а
@@ -33,11 +35,12 @@
     # поставить задание
     python3 client.py submit --rest … --contract axm1… \\
         --prompt-file вопрос.txt --price 1000000 \\
-        --prompts ./prompts --send --key заказчик
+        --prompts ./prompts --prompt-uri http://свой-адрес:8080 \\
+        --send --key заказчик
 
     # забрать ответ, когда он появится
     python3 client.py collect --rest … --contract axm1… --job-id 7 \\
-        --peers http://узел:8081 --wait 600
+        --wait 600
 """
 
 import argparse
@@ -64,7 +67,7 @@ def totals(params, price):
     return price, fee, price + fee
 
 
-def submit_message(params, prompt_hash, price):
+def submit_message(params, prompt_hash, price, prompt_uri):
     """Сообщение, деньги и КУДА его отправлять.
 
     Возвращает (сообщение, монеты, адрес-получатель или None).
@@ -75,9 +78,15 @@ def submit_message(params, prompt_hash, price):
       * CW20 — `send` НА ТОКЕН с вложенным сообщением. Напрямую реестр
         такие деньги не примет: два пути для одних денег означали бы два
         места, где их можно потерять.
+
+    `prompt_uri` — адрес, по которому исполнитель возьмёт текст запроса.
+    Обязателен с 27 октября и для обоих путей: задание, текст которого
+    взять неоткуда, не выполнит никто, а деньги оно займёт.
     """
     _, _, total = totals(params, price)
-    job = {"submit_job": {"prompt_hash": prompt_hash, "price": str(int(price))}}
+    job = {"submit_job": {"prompt_hash": prompt_hash,
+                          "prompt_uri": prompt_uri,
+                          "price": str(int(price))}}
     s = params.settlement
     if "native" in s:
         return job, f"{total}{s['native']}", None
@@ -116,6 +125,22 @@ def verdict_line(job, params, checks=None):
     return f"состояние {st or '?'}"
 
 
+def answer_sources(rest, contract, job, peers):
+    """Где искать ответ: адрес исполнителя, потом названное заказчиком.
+
+    Адрес исполнителя лежит в цепочке с 27 октября (`endpoint` в его
+    записи), и до этого заказчику приходилось узнавать его у людей.
+    Доверия это не добавляет: связка сверяется с обоими хэшами задания.
+    Недоступность цепочки здесь не отказ — остальные источники на месте.
+    """
+    first = None
+    try:
+        first = chain.endpoint_of(rest, contract, job.get("executor"))
+    except chain.ChainUnavailable as e:
+        print(f"адрес исполнителя не прочитан: {e}", file=sys.stderr)
+    return delivery.sources_with(first, peers)
+
+
 def fetch_answer(job, sources, job_id):
     """Ответ из связки, сверенный с цепочкой. (ответ, откуда, причины).
 
@@ -134,6 +159,13 @@ def fetch_answer(job, sources, job_id):
 # --- команды --------------------------------------------------------------
 
 def cmd_submit(a, params, sender):
+    if not a.prompt_uri:
+        # Отказ здесь, а не отвергнутая сделка: контракт требует адрес, и
+        # узнать об этом из списанного газа — худший способ.
+        print("ОТКАЗ: submit без --prompt-uri. Контракт требует адрес, по "
+              "которому исполнитель возьмёт текст: задание, запрос которого "
+              "взять неоткуда, не выполнит никто", file=sys.stderr)
+        return 2
     if a.prompt_file:
         with open(a.prompt_file, encoding="utf-8") as f:
             prompt = f.read()
@@ -158,10 +190,11 @@ def cmd_submit(a, params, sender):
             f.write(prompt)
         print(f"запрос выложен: {path}", file=sys.stderr)
     else:
-        print("ВНИМАНИЕ: --prompts не задан — запрос взять негде, задание "
-              "никто не выполнит", file=sys.stderr)
+        print(f"ВНИМАНИЕ: --prompts не задан — файл не выложен. По "
+              f"{a.prompt_uri} должен отдаваться {ph}.txt, иначе задание "
+              f"никто не выполнит", file=sys.stderr)
 
-    msg, funds, to = submit_message(params, ph, price)
+    msg, funds, to = submit_message(params, ph, price, a.prompt_uri)
     if to:
         # Реестр узнаёт о задании из вложенного сообщения, поэтому его
         # адрес подставляется здесь, а не в submit_message: там он не
@@ -231,7 +264,12 @@ def cmd_collect(a, params, sender):
         time.sleep(max(1, a.every))
 
     print(f"задание {a.job_id}: {line}", file=sys.stderr)
-    b, src, why = fetch_answer(job, a.peers, a.job_id)
+    srcs = answer_sources(a.rest, a.contract, job, a.peers)
+    if not srcs:
+        print("ОТКАЗ: связку взять негде: исполнитель адрес не объявил, и "
+              "--peers не задан", file=sys.stderr)
+        return 1
+    b, src, why = fetch_answer(job, srcs, a.job_id)
     if b is None:
         print("ответ не получен ни откуда — или получен не тот:",
               file=sys.stderr)
@@ -282,8 +320,12 @@ def main():
     p.add_argument("--price", type=int, help="сколько получит исполнитель")
     p.add_argument("--prompts", help="каталог, из которого запрос заберут "
                                      "узлы. Отдавать его можно чем угодно")
+    p.add_argument("--prompt-uri", help="адрес, по которому исполнитель "
+                                        "возьмёт запрос. Обязателен для "
+                                        "submit: его требует контракт")
     p.add_argument("--peers", action="append", default=[],
-                   help="где искать связку с ответом: каталог или http(s)")
+                   help="где ещё искать связку с ответом, кроме адреса "
+                        "исполнителя из цепочки: каталог или http(s)")
     p.add_argument("--job-id", type=int)
     p.add_argument("--out", help="куда записать ответ")
     p.add_argument("--wait", type=int, default=0,
