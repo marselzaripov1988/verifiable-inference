@@ -3,10 +3,12 @@ use cosmwasm_std::{
     Env, MessageInfo, Order, Response, StdResult, Uint128, WasmMsg,
 };
 
+use cw_storage_plus::Bound;
+
 use crate::error::ContractError;
 use crate::msg::{
     ChecksResponse, ConformanceRef, Cw20Execute, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg,
-    MigrateMsg, QueryMsg, ReceiveHook,
+    JobEntry, JobsResponse, MigrateMsg, NextJobResponse, QueryMsg, ReceiveHook,
 };
 use crate::state::{
     Check, Config, ConfigV1, ConfigV2, Conformance, Executor, ExecutorStatus, Forfeit, Job,
@@ -23,6 +25,49 @@ fn fee_for(price: Uint128, bps: u16) -> Uint128 {
     let num = price * Uint128::from(bps as u128);
     let den = Uint128::from(10_000u128);
     (num + den - Uint128::one()) / den
+}
+
+/// Предел длины адреса доставки. 200 символов хватает на имя, порт и
+/// путь; больше означало бы, что в реестр кладут не адрес.
+const URI_MAX: usize = 200;
+
+/// Сколько заданий отдаётся запросом списка по умолчанию и не больше.
+///
+/// Запись задания — три хэша по 64 символа, два адреса и адрес доставки,
+/// то есть под килобайт. Пятьдесят записей это разумный ответ, пять
+/// тысяч — отказ узла REST, выглядящий как недоступность цепочки.
+const JOBS_PAGE: u32 = 30;
+const JOBS_PAGE_MAX: u32 = 50;
+
+/// Годен ли адрес доставки. Проверяется только ФОРМА, и это важно знать.
+///
+/// Чего контракт проверить НЕ МОЖЕТ и не делает вид, что может: что по
+/// адресу кто-то отвечает и что отдаёт он то самое. Первое изнутри
+/// цепочки не видно вовсе; второе решает хэш из задания, а не запись в
+/// реестре. Поэтому адрес здесь — подсказка, где смотреть, и ничего
+/// больше.
+///
+/// Форма же проверяется затем, что мусор в этом поле стоит дорого:
+/// адрес склеивается клиентом в запрос, и пробел или перевод строки
+/// внутри превращают его в другой запрос. Длина считается в байтах — это
+/// строже, чем в символах, а имя не из ASCII всё равно приходит в
+/// punycode.
+fn validate_uri(uri: &str) -> Result<(), ContractError> {
+    let rest = uri
+        .strip_prefix("https://")
+        .or_else(|| uri.strip_prefix("http://"));
+    let ok = uri.len() <= URI_MAX
+        && matches!(rest, Some(r) if !r.is_empty())
+        && !uri.chars().any(|c| c.is_whitespace() || c.is_control());
+    if ok {
+        return Ok(());
+    }
+    Err(ContractError::BadUri {
+        // Обрезается: отказ с двухсотсимвольным адресом внутри читать
+        // некому, а причина видна и по началу.
+        uri: uri.chars().take(80).collect(),
+        limit: URI_MAX,
+    })
 }
 
 /// Выплата в единице расчёта. ЕДИНСТВЕННОЕ место, которое знает, чем
@@ -183,8 +228,22 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
             code: CURRENT_VERSION,
         });
     }
-    if was != 1 && was != 2 {
+    if was != 1 && was != 2 && was != 3 {
         return Err(ContractError::MigrateUnknown { have: was });
+    }
+    // Форма 3 -> 4: настройки НЕ меняются, меняются записи узлов и
+    // заданий — у них появились адреса доставки. Переписывать их не
+    // нужно: оба поля читаются через `serde(default)`, то есть прежняя
+    // запись становится записью без адреса. Узел без адреса заданий не
+    // берёт, пока не отправит `SetEndpoint`, — и это видно ему же по
+    // отказу, а не молча.
+    if was == 3 {
+        STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
+        return Ok(Response::new()
+            .add_attribute("action", "migrate")
+            .add_attribute("from", was.to_string())
+            .add_attribute("to", CURRENT_VERSION.to_string())
+            .add_attribute("changed", "endpoint,prompt_uri,jobs_query"));
     }
     // Настройки читаются СВОЕЙ формой: нынешняя структура запрещает
     // неизвестные поля и не прощает пропущенных, поэтому ни байты формы
@@ -215,7 +274,16 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
         .add_attribute("action", "migrate")
         .add_attribute("from", was.to_string())
         .add_attribute("to", CURRENT_VERSION.to_string())
-        .add_attribute("changed", if was == 1 { "attestor_dropped,ttl_added" } else { "ttl_added" })
+        // Форма 1 и 2 переходят сразу в 4: настройки доводятся до вида 3
+        // (сроки), а адреса доставки появляются сами — `serde(default)`.
+        .add_attribute(
+            "changed",
+            if was == 1 {
+                "attestor_dropped,ttl_added,endpoint,prompt_uri,jobs_query"
+            } else {
+                "ttl_added,endpoint,prompt_uri,jobs_query"
+            },
+        )
         .add_attribute("claim_ttl_seconds", cfg.claim_ttl_seconds.to_string())
         .add_attribute("check_ttl_seconds", cfg.check_ttl_seconds.to_string()))
 }
@@ -280,11 +348,14 @@ pub fn execute(
             card_class,
             kernel_cache_hash,
         ),
+        ExecuteMsg::SetEndpoint { endpoint } => set_endpoint(deps, info, endpoint),
         ExecuteMsg::DepositStake {} => deposit_stake(deps, info),
         ExecuteMsg::WithdrawStake { amount } => withdraw_stake(deps, info, amount),
-        ExecuteMsg::SubmitJob { prompt_hash, price } => {
-            submit_job_native(deps, info, prompt_hash, price)
-        }
+        ExecuteMsg::SubmitJob {
+            prompt_hash,
+            prompt_uri,
+            price,
+        } => submit_job_native(deps, info, prompt_hash, prompt_uri, price),
         ExecuteMsg::Receive(r) => receive_cw20(deps, info, r),
         ExecuteMsg::SubmitConformance {
             divergence_micro,
@@ -496,11 +567,41 @@ fn register_executor(
             convictions: 0,
             stake: Uint128::zero(),
             conformance: None,
+            // Адрес доставки объявляется отдельным сообщением: он
+            // меняется, а зарегистрироваться второй раз нельзя. Пока его
+            // нет, узел проверяющий, но не исполнитель — см. claim_job.
+            endpoint: None,
         },
     )?;
     Ok(Response::new()
         .add_attribute("action", "register_executor")
         .add_attribute("executor", info.sender))
+}
+
+/// Объявить или снять адрес, по которому узел отдаёт свои связки.
+///
+/// Забаненному не запрещается, и это не поблажка: задания он не берёт
+/// (`active_executor`), значит проверять по его адресу нечего, а запирать
+/// тут нечего — в отличие от залога, который забаненному принимать
+/// нельзя, потому что забрать его он уже не сможет.
+fn set_endpoint(
+    deps: DepsMut,
+    info: MessageInfo,
+    endpoint: Option<String>,
+) -> Result<Response, ContractError> {
+    let mut e = EXECUTORS
+        .may_load(deps.storage, &info.sender)?
+        .ok_or(ContractError::ExecutorUnknown)?;
+    if let Some(u) = &endpoint {
+        validate_uri(u)?;
+    }
+    e.endpoint = endpoint;
+    let shown = e.endpoint.clone().unwrap_or_else(|| "снят".to_string());
+    EXECUTORS.save(deps.storage, &info.sender, &e)?;
+    Ok(Response::new()
+        .add_attribute("action", "set_endpoint")
+        .add_attribute("executor", info.sender)
+        .add_attribute("endpoint", shown))
 }
 
 fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
@@ -621,9 +722,13 @@ fn receive_cw20(
         return Err(ContractError::ZeroPrice);
     }
     match from_json(&r.msg)? {
-        ReceiveHook::SubmitJob { prompt_hash, price } => {
+        ReceiveHook::SubmitJob {
+            prompt_hash,
+            prompt_uri,
+            price,
+        } => {
             let client = deps.api.addr_validate(&r.sender)?;
-            create_job(deps, &cfg, client, prompt_hash, price, r.amount)
+            create_job(deps, &cfg, client, prompt_hash, prompt_uri, price, r.amount)
         }
     }
 }
@@ -635,17 +740,23 @@ fn receive_cw20(
 /// заказчик. Они обязаны различаться ровно на плату проверяющим:
 /// меньше — проверки нечем оплатить, больше — остаток завис бы на
 /// контракте, и вернуть его было бы некому.
+#[allow(clippy::too_many_arguments)]
 fn create_job(
     deps: DepsMut,
     cfg: &Config,
     client: Addr,
     prompt_hash: String,
+    prompt_uri: String,
     price: Uint128,
     paid: Uint128,
 ) -> Result<Response, ContractError> {
     if price.is_zero() {
         return Err(ContractError::ZeroPrice);
     }
+    // Адрес текста обязателен. Задание, запрос которого взять неоткуда,
+    // никто не выполнит: оно простоит до отмены, заняв деньги заказчика.
+    // Отказать сразу дешевле, чем заметить это через час.
+    validate_uri(&prompt_uri)?;
     let fee_total = fee_for(price, cfg.verifier_fee_bps);
     let want = price + fee_total;
     if paid != want {
@@ -663,6 +774,7 @@ fn create_job(
         &Job {
             client,
             prompt_hash,
+            prompt_uri,
             executor: None,
             state: JobState::Open,
             answer_hash: None,
@@ -691,6 +803,7 @@ fn submit_job_native(
     deps: DepsMut,
     info: MessageInfo,
     prompt_hash: String,
+    prompt_uri: String,
     price: Uint128,
 ) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
@@ -725,7 +838,7 @@ fn submit_job_native(
         return Err(ContractError::WrongSettlementFunds { want: denom, got });
     }
     let client = info.sender;
-    create_job(deps, &cfg, client, prompt_hash, price, sent)
+    create_job(deps, &cfg, client, prompt_hash, prompt_uri, price, sent)
 }
 
 fn active_executor(deps: &DepsMut, who: &Addr) -> Result<Executor, ContractError> {
@@ -883,7 +996,21 @@ fn claim_job(
     info: MessageInfo,
     job_id: u64,
 ) -> Result<Response, ContractError> {
-    active_executor(&deps, &info.sender)?;
+    let me = active_executor(&deps, &info.sender)?;
+    // Без адреса доставки задание не выдаётся. Проверяется здесь, вместе
+    // с залогом и пробой, по той же причине: условие должно держаться в
+    // момент взятия, а не когда-то раньше.
+    //
+    // Это о ЖИВОСТИ, а не о правильности. Узел, у которого связку взять
+    // негде, сдаёт ответ, которого никто не проверит: задание доходит до
+    // `Answered` и стоит там до истечения срока сбора — час у заказчика
+    // заперты деньги, и ни ответа, ни вердикта. Контракт не умеет
+    // проверить, что по адресу отвечают; но отличить «адрес назван» от
+    // «не назван» он умеет, и этого хватает, чтобы такой узел не брал
+    // задания молча.
+    if me.endpoint.is_none() {
+        return Err(ContractError::NoEndpoint);
+    }
     let mut job = JOBS
         .may_load(deps.storage, job_id)?
         .ok_or(ContractError::JobUnknown)?;
@@ -1418,6 +1545,25 @@ pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
             to_json_binary(&EXECUTORS.load(deps.storage, &addr)?)
         }
         QueryMsg::Job { job_id } => to_json_binary(&JOBS.load(deps.storage, job_id)?),
+        QueryMsg::Jobs { start_after, limit } => {
+            let n = limit.unwrap_or(JOBS_PAGE).min(JOBS_PAGE_MAX) as usize;
+            // `exclusive`, а не `inclusive`: `start_after` означает «после
+            // этого номера». Иначе продолжение страницы начиналось бы с
+            // последнего отданного задания, и узел видел бы его дважды.
+            let from = start_after.map(Bound::exclusive);
+            let jobs = JOBS
+                .range(deps.storage, from, None, Order::Ascending)
+                .take(n)
+                .map(|r| r.map(|(job_id, job)| JobEntry { job_id, job }))
+                .collect::<StdResult<Vec<_>>>()?;
+            to_json_binary(&JobsResponse {
+                jobs,
+                next_job: NEXT_JOB.load(deps.storage)?,
+            })
+        }
+        QueryMsg::NextJob {} => to_json_binary(&NextJobResponse {
+            next_job: NEXT_JOB.load(deps.storage)?,
+        }),
         QueryMsg::Checks { job_id } => {
             let checks = load_checks(deps, job_id)?;
             let job = JOBS.load(deps.storage, job_id)?;

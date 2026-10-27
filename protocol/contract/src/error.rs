@@ -33,6 +33,12 @@ pub enum ContractError {
     #[error("исполнитель не зарегистрирован")]
     ExecutorUnknown,
 
+    #[error("адрес доставки не объявлен: без него связку взять негде. Отправьте SetEndpoint")]
+    NoEndpoint,
+
+    #[error("адрес {uri} не годится: нужен http(s), без пробелов, не длиннее {limit} символов")]
+    BadUri { uri: String, limit: usize },
+
     #[error("исполнитель не допущен к заданиям (статус {status})")]
     ExecutorNotActive { status: String },
 

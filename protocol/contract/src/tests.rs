@@ -11,13 +11,13 @@
 //! сломается здесь.
 
 use cosmwasm_std::testing::{mock_dependencies, mock_env, mock_info};
-use cosmwasm_std::{coins, from_json, to_json_binary, Addr, DepsMut, Uint128};
+use cosmwasm_std::{coins, from_json, to_json_binary, Addr, Deps, DepsMut, Uint128};
 
 use crate::contract::{commit_hash, execute, instantiate, migrate, query};
 use crate::error::ContractError;
 use crate::msg::{
-    ChecksResponse, ConformanceRef, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg, MigrateMsg,
-    QueryMsg, ReceiveHook,
+    ChecksResponse, ConformanceRef, Cw20ReceiveMsg, ExecuteMsg, InstantiateMsg, JobsResponse,
+    MigrateMsg, NextJobResponse, QueryMsg, ReceiveHook,
 };
 use crate::state::{
     Config, Executor, ExecutorStatus, Forfeit, Job, JobState, MicroLog, Settlement,
@@ -50,6 +50,11 @@ const TOTAL: u128 = PRICE + FEE;
 /// (`share = fee_total / checks.len()`), так что при 970 двое получали бы
 /// вдвое больше замеренной стоимости — а платил бы это заказчик.
 const FEE_BPS: u16 = 485;
+
+/// Адреса доставки. Проверять по ним ничего нельзя и не нужно: контракт
+/// смотрит только форму, а содержимое решают хэши.
+const ENDPOINT: &str = "http://node1.example:8081";
+const PROMPT_URI: &str = "http://client.example:8080";
 
 /// Сколько проверок требуется. Двух хватает: усреднять нечего, внутри
 /// класса честные векторы тождественны, а лгущего проверяющего разберёт
@@ -152,9 +157,25 @@ fn register_and_stake(deps: DepsMut, who: &str) {
         ExecuteMsg::DepositStake {},
     )
     .unwrap();
+    // Адрес доставки — четвёртый шаг, и без него заданий не дают:
+    // связку исполнителя взять было бы негде.
+    announce(d.branch(), who, ENDPOINT);
     // Внутри класса честный узел заявляет РОВНО ноль: его вектор
     // тождествен эталонному.
     pass_probe(d.branch(), who, 0);
+}
+
+/// Объявить адрес доставки.
+fn announce(deps: DepsMut, who: &str, uri: &str) {
+    execute(
+        deps,
+        mock_env(),
+        mock_info(who, &[]),
+        ExecuteMsg::SetEndpoint {
+            endpoint: Some(uri.into()),
+        },
+    )
+    .unwrap();
 }
 
 /// Сдать пробу. Число заявляется исполнителем, обязательство — его
@@ -206,7 +227,7 @@ fn submit_job(deps: DepsMut) {
             sender: CLIENT.into(),
             amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into(),
+                prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
                 price: Uint128::new(PRICE),
             })
             .unwrap(),
@@ -372,8 +393,19 @@ fn odnoy_registracii_ne_hvataet() {
     .unwrap_err();
     assert!(matches!(err, ContractError::ConformanceMissing),
             "вышло {err:?}");
-    // И только с пробой — да.
+    // Проба есть, а адреса доставки нет — и это тоже не допуск: связку
+    // такого узла взять негде, проверять его ответ будет нечем.
     pass_probe(deps.as_mut(), EXEC, 0);
+    let err = execute(
+        deps.as_mut(),
+        mock_env(),
+        mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 },
+    )
+    .unwrap_err();
+    assert!(matches!(err, ContractError::NoEndpoint), "вышло {err:?}");
+    // И только со всем вместе — да.
+    announce(deps.as_mut(), EXEC, ENDPOINT);
     execute(
         deps.as_mut(),
         mock_env(),
@@ -976,7 +1008,7 @@ fn chuzhoy_cw20_ne_oplachivaet() {
             sender: CLIENT.into(),
             amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into(),
+                prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
                 price: Uint128::new(PRICE) }).unwrap(),
         })).unwrap_err();
     assert!(matches!(err, ContractError::WrongCw20 { .. }));
@@ -1586,7 +1618,7 @@ fn submit_job_native(deps: DepsMut) {
         mock_env(),
         mock_info(CLIENT, &coins(TOTAL, NATIVE)),
         ExecuteMsg::SubmitJob {
-            prompt_hash: "ph1".into(),
+            prompt_hash: "ph1".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::new(PRICE),
         },
     )
@@ -1623,7 +1655,7 @@ fn bez_deneg_zadaniya_net() {
     let mut deps = mock_dependencies();
     setup_native(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::WrongSettlementFunds { ref got, .. }
         if got == "ничего"));
@@ -1635,7 +1667,7 @@ fn chuzhaya_moneta_ne_oplachivaet() {
     setup_native(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(),
         mock_info(CLIENT, &coins(TOTAL, "uatom")),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::WrongSettlementFunds { .. }));
 }
@@ -1652,7 +1684,7 @@ fn chuzhaya_moneta_ryadom_s_nuzhnoy_otvergaetsya() {
     });
     funds.sort_by(|a, b| a.denom.cmp(&b.denom));
     let err = execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &funds),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::WrongSettlementFunds { .. }));
 }
@@ -1667,7 +1699,7 @@ fn cw20_pri_rodnom_raschyote_ne_prinimaetsya() {
             sender: CLIENT.into(),
             amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into(),
+                prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
                 price: Uint128::new(PRICE) }).unwrap(),
         })).unwrap_err();
     assert!(matches!(err, ContractError::NotCw20Settlement));
@@ -1680,7 +1712,7 @@ fn rodnoy_platyozh_pri_raschyote_cw20_ne_prinimaetsya() {
     setup(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(),
         mock_info(CLIENT, &coins(TOTAL, NATIVE)),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::new(PRICE) }).unwrap_err();
     assert!(matches!(err, ContractError::NotNativeSettlement { .. }));
 }
@@ -1761,7 +1793,7 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
         ExecuteMsg::Receive(Cw20ReceiveMsg {
             sender: CLIENT.into(), amount: Uint128::new(TOTAL),
             msg: to_json_binary(&ReceiveHook::SubmitJob {
-                prompt_hash: "ph".into(),
+                prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
                 price: Uint128::new(PRICE) }).unwrap(),
         })).unwrap_err();
     assert!(matches!(err, ContractError::NotCw20Settlement));
@@ -1896,7 +1928,7 @@ fn zakazchik_vnosit_cenu_plyus_dolyu() {
     setup_native(deps.as_mut());
     let res = execute(deps.as_mut(), mock_env(),
         mock_info(CLIENT, &coins(TOTAL, NATIVE)),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::new(PRICE) }).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "price"
         && a.value == PRICE.to_string()));
@@ -1915,7 +1947,7 @@ fn nedoplata_i_pereplata_otvergayutsya() {
     for sent in [PRICE, TOTAL - 1, TOTAL + 1] {
         let err = execute(deps.as_mut(), mock_env(),
             mock_info(CLIENT, &coins(sent, NATIVE)),
-            ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+            ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
                 price: Uint128::new(PRICE) }).unwrap_err();
         assert!(matches!(err, ContractError::WrongTotal { .. }),
             "сумма {sent} принята, а не должна");
@@ -1928,7 +1960,7 @@ fn nulevaya_cena_otvergaetsya() {
     setup_native(deps.as_mut());
     let err = execute(deps.as_mut(), mock_env(),
         mock_info(CLIENT, &coins(1, NATIVE)),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::zero() }).unwrap_err();
     assert!(matches!(err, ContractError::ZeroPrice));
 }
@@ -1989,7 +2021,7 @@ fn dolya_delitsya_vverh_a_ostatok_vozvrashchaetsya_zakazchiku() {
     setup_native(deps.as_mut());
     register_and_stake(deps.as_mut(), EXEC);
     execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &coins(2, NATIVE)),
-        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(),
+        ExecuteMsg::SubmitJob { prompt_hash: "ph".into(), prompt_uri: PROMPT_URI.into(),
             price: Uint128::one() }).unwrap();
     let id = 1;
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -2125,7 +2157,8 @@ fn perenos_sbrasyvaet_attestora_i_hranit_ostalnoe() {
     assert!(res
         .attributes
         .iter()
-        .any(|a| a.key == "changed" && a.value == "attestor_dropped,ttl_added"));
+        .any(|a| a.key == "changed"
+            && a.value == "attestor_dropped,ttl_added,endpoint,prompt_uri,jobs_query"));
     assert_eq!(
         STATE_VERSION.load(deps.as_ref().storage).unwrap(),
         CURRENT_VERSION
@@ -2249,8 +2282,10 @@ fn put_v2_config(deps: DepsMut) {
 
 #[test]
 fn perenos_formy_2_dobavlyaet_sroki() {
-    // Это тот перенос, который пойдёт на живую цепочку: все три
-    // экземпляра сейчас на форме 2.
+    // Форма 2 была у трёх экземпляров до 26 октября; сейчас у них форма
+    // 3 (см. `perenos_formy_3_dobavlyaet_adresa`). Тест остаётся: переход
+    // 2 -> 4 обязан работать, иначе экземпляр, пропустивший перенос, уже
+    // не догонит.
     let mut deps = mock_dependencies();
     put_v2_config(deps.as_mut());
     STATE_VERSION_FOR_TEST
@@ -2261,7 +2296,8 @@ fn perenos_formy_2_dobavlyaet_sroki() {
     assert!(res
         .attributes
         .iter()
-        .any(|a| a.key == "changed" && a.value == "ttl_added"));
+        .any(|a| a.key == "changed"
+            && a.value == "ttl_added,endpoint,prompt_uri,jobs_query"));
     let cfg: Config = from_json(
         query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
     assert_eq!(cfg.claim_ttl_seconds, 600);
@@ -2273,7 +2309,7 @@ fn perenos_formy_2_dobavlyaet_sroki() {
     assert_eq!(cfg.min_stake, Uint128::new(MIN_STAKE));
     assert_eq!(
         STATE_VERSION_FOR_TEST.load(deps.as_ref().storage).unwrap(),
-        3
+        CURRENT_VERSION
     );
 }
 
@@ -2435,4 +2471,383 @@ fn nulevoy_srok_ne_prinimaetsya() {
             }).unwrap_err();
         assert!(matches!(err, ContractError::ZeroTtl), "вышло {err:?}");
     }
+}
+
+// --- адреса доставки и список заданий --------------------------------------
+//
+// Добавлено 27 октября, одной правкой. Закрывалась дыра живости: связку
+// исполнителя и текст запроса заказчика брали по адресам, которые
+// передавались ЛЮДЬМИ, — реестра адресов не было. На правильность это не
+// влияло (подмену ловит хэш), на живость влияло прямо: кто не отдал
+// связку, тому не проверят ответ.
+//
+// Заодно появился запрос списка заданий: без него узел перебирал номера
+// по одному и останавливался на отсутствующем.
+//
+// Главное свойство, которое проверяется ниже: адрес в цепочке НЕ даёт
+// доверия. Контракт смотрит только форму, а что считать верным — решает
+// хэш.
+
+/// Адрес доставки узла, как его отдаёт запрос.
+fn endpoint_of(deps: Deps, who: &str) -> Option<String> {
+    let e: Executor = from_json(query(deps, mock_env(),
+        QueryMsg::Executor { address: who.into() }).unwrap()).unwrap();
+    e.endpoint
+}
+
+/// Страница списка заданий.
+fn jobs_page(deps: Deps, start_after: Option<u64>, limit: Option<u32>)
+    -> JobsResponse {
+    from_json(query(deps, mock_env(),
+        QueryMsg::Jobs { start_after, limit }).unwrap()).unwrap()
+}
+
+#[test]
+fn uzel_bez_adresa_zadaniy_ne_beret() {
+    // Залог внесён, проба пройдена, связку взять негде. Такой узел сдал
+    // бы ответ, которого никто не проверит: задание дошло бы до Answered
+    // и простояло час до истечения срока, заперев деньги заказчика.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let mut d = deps.as_mut();
+    execute(d.branch(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::RegisterExecutor {
+            model: MODEL.into(), runtime: RUNTIME.into(), dtype: DTYPE.into(),
+            card_class: ARCH.into(), kernel_cache_hash: CACHE.into(),
+        }).unwrap();
+    execute(d.branch(), mock_env(), mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap();
+    pass_probe(d.branch(), EXEC, 0);
+    submit_job(d.branch());
+
+    let err = execute(d.branch(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NoEndpoint), "вышло {err:?}");
+
+    // Объявил адрес — берёт.
+    announce(d.branch(), EXEC, ENDPOINT);
+    execute(d.branch(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
+}
+
+#[test]
+fn proveryayushchemu_adres_ne_nuzhen() {
+    // Связка нужна ОТ исполнителя, а не от проверяющего: его вектор
+    // раскрывается на цепочке при споре, а не забирается по http. Значит
+    // требовать адрес от проверяющего нечем — и не требуется.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    // Проверяющие заводятся через register_and_probe, то есть БЕЗ адреса.
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: "checker0".into() }).unwrap()).unwrap();
+    assert!(e.endpoint.is_none(), "проверяющий работал без адреса");
+    execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+}
+
+#[test]
+fn adres_menyaetsya_i_snimaetsya() {
+    // Адрес обязан меняться: карта переарендована, машина переехала,
+    // порт другой. Зарегистрироваться второй раз нельзя, поэтому способ
+    // сменить адрес — отдельное сообщение.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    assert_eq!(endpoint_of(deps.as_ref(), EXEC).as_deref(), Some(ENDPOINT));
+
+    let other = "https://node1.example/bundles";
+    announce(deps.as_mut(), EXEC, other);
+    assert_eq!(endpoint_of(deps.as_ref(), EXEC).as_deref(), Some(other));
+
+    // Снятие — законный режим: узел остаётся проверяющим, но заданий не
+    // берёт.
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::SetEndpoint { endpoint: None }).unwrap();
+    assert_eq!(endpoint_of(deps.as_ref(), EXEC), None);
+    submit_job(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NoEndpoint), "вышло {err:?}");
+}
+
+#[test]
+fn adres_nezaregistrirovannogo_ne_prinimaetsya() {
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info("nobody", &[]),
+        ExecuteMsg::SetEndpoint { endpoint: Some(ENDPOINT.into()) }).unwrap_err();
+    assert!(matches!(err, ContractError::ExecutorUnknown), "вышло {err:?}");
+}
+
+/// Адреса, которые приняты быть не должны, и почему каждый.
+fn bad_uris() -> Vec<String> {
+    vec![
+        // Без схемы: клиент не знает, чем идти.
+        "node1.example:8081".to_string(),
+        // Не та схема: доставка идёт по http(s).
+        "ftp://node1.example".to_string(),
+        // Пусто после схемы: идти некуда.
+        "http://".to_string(),
+        // Пробел внутри склеится в другой запрос.
+        "http://node1.example /b".to_string(),
+        // Перевод строки — то же, но хуже: его не видно.
+        "http://node1.example\n/b".to_string(),
+        // Длиннее предела.
+        format!("http://{}", "a".repeat(300)),
+        // Пустая строка.
+        String::new(),
+    ]
+}
+
+#[test]
+fn krivoy_adres_uzla_otvergaetsya() {
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    for uri in bad_uris() {
+        let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+            ExecuteMsg::SetEndpoint { endpoint: Some(uri.clone()) }).unwrap_err();
+        assert!(matches!(err, ContractError::BadUri { .. }),
+            "адрес {uri:?} принят, а не должен: {err:?}");
+    }
+    // Прежний адрес при этом цел: отказ ничего не записал.
+    assert_eq!(endpoint_of(deps.as_ref(), EXEC).as_deref(), Some(ENDPOINT));
+}
+
+#[test]
+fn zadanie_bez_adresa_teksta_ne_stavitsya() {
+    // Задание, текст которого взять неоткуда, не выполнит никто: оно
+    // простоит до отмены, заняв деньги заказчика ни за что.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    for uri in bad_uris() {
+        let err = execute(deps.as_mut(), mock_env(),
+            mock_info(CLIENT, &coins(TOTAL, NATIVE)),
+            ExecuteMsg::SubmitJob {
+                prompt_hash: "ph".into(),
+                prompt_uri: uri.clone(),
+                price: Uint128::new(PRICE),
+            }).unwrap_err();
+        assert!(matches!(err, ContractError::BadUri { .. }),
+            "адрес {uri:?} принят, а не должен: {err:?}");
+    }
+}
+
+#[test]
+fn adres_teksta_lezhit_v_zadanii() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &coins(TOTAL, NATIVE)),
+        ExecuteMsg::SubmitJob {
+            prompt_hash: "ph".into(),
+            prompt_uri: PROMPT_URI.into(),
+            price: Uint128::new(PRICE),
+        }).unwrap();
+    let job: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(job.prompt_uri, PROMPT_URI);
+    assert_eq!(job.state, JobState::Open);
+}
+
+#[test]
+fn adres_teksta_prihodit_i_cherez_cw20() {
+    // Путь оплаты на требования к заданию не влияет: иначе CW20 был бы
+    // дырой, через которую ставится задание без адреса текста.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    submit_job(deps.as_mut());
+    let job: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(job.prompt_uri, PROMPT_URI);
+
+    let err = execute(deps.as_mut(), mock_env(), mock_info(CW20, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: CLIENT.into(),
+            amount: Uint128::new(TOTAL),
+            msg: to_json_binary(&ReceiveHook::SubmitJob {
+                prompt_hash: "ph".into(),
+                prompt_uri: "ftp://nowhere".into(),
+                price: Uint128::new(PRICE),
+            }).unwrap(),
+        })).unwrap_err();
+    assert!(matches!(err, ContractError::BadUri { .. }), "вышло {err:?}");
+}
+
+/// Поставить `n` заданий родной монетой. Номера сплошные, с единицы.
+fn submit_n_native(deps: DepsMut, n: u64) {
+    let mut d = deps;
+    for i in 1..=n {
+        execute(d.branch(), mock_env(), mock_info(CLIENT, &coins(TOTAL, NATIVE)),
+            ExecuteMsg::SubmitJob {
+                prompt_hash: format!("ph{i}"),
+                prompt_uri: PROMPT_URI.into(),
+                price: Uint128::new(PRICE),
+            }).unwrap();
+    }
+}
+
+#[test]
+fn spisok_zadaniy_idyot_po_poryadku_i_stranicami() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    submit_n_native(deps.as_mut(), 7);
+
+    let first = jobs_page(deps.as_ref(), None, Some(3));
+    assert_eq!(first.jobs.iter().map(|e| e.job_id).collect::<Vec<_>>(),
+               vec![1, 2, 3]);
+    // Граница списка приходит тем же запросом: иначе цикл узла стоил бы
+    // двух вместо одного.
+    assert_eq!(first.next_job, 8);
+    // Записи отдаются целиком, а не номерами: узлу нужны состояние,
+    // хэши и адрес текста.
+    assert_eq!(first.jobs[0].job.prompt_hash, "ph1");
+    assert_eq!(first.jobs[0].job.prompt_uri, PROMPT_URI);
+
+    // `start_after` значит ПОСЛЕ: продолжение не повторяет последнее
+    // отданное задание.
+    let next = jobs_page(deps.as_ref(), Some(3), Some(3));
+    assert_eq!(next.jobs.iter().map(|e| e.job_id).collect::<Vec<_>>(),
+               vec![4, 5, 6]);
+    let tail = jobs_page(deps.as_ref(), Some(6), Some(3));
+    assert_eq!(tail.jobs.iter().map(|e| e.job_id).collect::<Vec<_>>(), vec![7]);
+    // Конец списка — пустая страница, а не ошибка: отличать «больше нет»
+    // от «цепочка не ответила» узел обязан, и теперь для этого не нужно
+    // разбирать текст ошибки.
+    let past = jobs_page(deps.as_ref(), Some(7), Some(3));
+    assert!(past.jobs.is_empty());
+    assert_eq!(past.next_job, 8);
+}
+
+#[test]
+fn stranica_ogranichena_sverhu() {
+    // Предел нужен не из вежливости: запись задания это три хэша, два
+    // адреса и адрес текста, и страница в тысячу вернулась бы отказом
+    // узла REST — то есть выглядела бы недоступностью цепочки.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    submit_n_native(deps.as_mut(), 60);
+    assert_eq!(jobs_page(deps.as_ref(), None, Some(1000)).jobs.len(), 50);
+    // Без limit — умолчание.
+    assert_eq!(jobs_page(deps.as_ref(), None, None).jobs.len(), 30);
+    assert_eq!(jobs_page(deps.as_ref(), None, Some(0)).jobs.len(), 0);
+}
+
+#[test]
+fn granica_spiska_est_i_do_pervogo_zadaniya() {
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let r: NextJobResponse = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::NextJob {}).unwrap()).unwrap();
+    assert_eq!(r.next_job, 1, "следующее задание — первое");
+    let page = jobs_page(deps.as_ref(), None, None);
+    assert!(page.jobs.is_empty());
+    assert_eq!(page.next_job, 1);
+}
+
+#[test]
+fn zakrytoe_zadanie_iz_spiska_ne_propadaet() {
+    // Номера сплошные, и это свойство, на которое опирается узел:
+    // отмена задания его не удаляет, а закрывает.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    submit_n_native(deps.as_mut(), 3);
+    execute(deps.as_mut(), mock_env(), mock_info(CLIENT, &[]),
+        ExecuteMsg::CancelJob { job_id: 2 }).unwrap();
+    let page = jobs_page(deps.as_ref(), None, None);
+    assert_eq!(page.jobs.iter().map(|e| e.job_id).collect::<Vec<_>>(),
+               vec![1, 2, 3]);
+    assert_eq!(page.jobs[1].job.state, JobState::Settled);
+}
+
+// --- перенос формы 3 на форму 4 -------------------------------------------
+
+/// Сырой ключ записи в карте cw-storage-plus: двухбайтовая длина
+/// пространства имён, само пространство, затем ключ.
+///
+/// Нужен затем, чтобы положить в хранилище запись ПРЕЖНЕЙ формы — без
+/// новых полей. Иначе перенос проверялся бы на записях, которые сам же
+/// код и создал, то есть на том, чего на живой цепочке нет.
+fn raw_map_key(ns: &[u8], key: &[u8]) -> Vec<u8> {
+    let mut k = (ns.len() as u16).to_be_bytes().to_vec();
+    k.extend_from_slice(ns);
+    k.extend_from_slice(key);
+    k
+}
+
+#[test]
+fn perenos_formy_3_dobavlyaet_adresa() {
+    // Это тот перенос, который пойдёт на живую цепочку: все три
+    // экземпляра на форме 3 (code_id 341, проверено 27 октября).
+    //
+    // Настройки при нём НЕ меняются — меняются записи узлов и заданий, у
+    // которых появились адреса. Поэтому главное здесь: записи ПРЕЖНЕЙ
+    // формы читаются после переноса, а не отказывают разбором.
+    let mut deps = mock_dependencies();
+    setup_native(deps.as_mut());
+    let before: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+
+    // Запись узла прежней формы: все поля формы 3, адреса нет.
+    let old_exec = serde_json::json!({
+        "model": MODEL, "runtime": RUNTIME, "dtype": DTYPE,
+        "card_class": ARCH, "kernel_cache_hash": CACHE,
+        "status": "active", "jobs_done": 0, "convictions": 0, "abandoned": 0,
+        "stake": MIN_STAKE.to_string(),
+        "conformance": {
+            "divergence_micro": 0,
+            "logprobs_hash": commit_hash(&probe_honest()),
+            "ref_version": 1,
+        },
+    });
+    deps.as_mut().storage.set(
+        &raw_map_key(b"executors", EXEC.as_bytes()),
+        serde_json::to_vec(&old_exec).unwrap().as_slice());
+
+    // Задание прежней формы: адреса текста нет.
+    let old_job = serde_json::json!({
+        "client": CLIENT, "prompt_hash": "ph", "executor": null,
+        "state": "open", "answer_hash": null, "logprobs_hash": null,
+        "answer_tokens": null, "guilty": null, "reveal_verified": null,
+        "price": PRICE.to_string(), "fee_total": FEE.to_string(),
+        "paid": false, "claimed_at": null, "answered_at": null,
+    });
+    deps.as_mut().storage.set(
+        &raw_map_key(b"jobs", &1u64.to_be_bytes()),
+        serde_json::to_vec(&old_job).unwrap().as_slice());
+    STATE_VERSION_FOR_TEST.save(deps.as_mut().storage, &3u16).unwrap();
+
+    let res = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "from" && a.value == "3"));
+    assert!(res.attributes.iter().any(|a| a.key == "changed"
+        && a.value == "endpoint,prompt_uri,jobs_query"));
+    assert_eq!(STATE_VERSION_FOR_TEST.load(deps.as_ref().storage).unwrap(),
+               CURRENT_VERSION);
+
+    // Настройки не тронуты: в форме 4 они те же.
+    let after: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(before, after, "перенос настроек не менял");
+
+    // Запись прежней формы ЧИТАЕТСЯ, и адреса у неё нет.
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.endpoint, None);
+    assert_eq!(e.stake, Uint128::new(MIN_STAKE));
+    assert!(e.conformance.is_some(), "проба цела");
+    let j: Job = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Job { job_id: 1 }).unwrap()).unwrap();
+    assert_eq!(j.prompt_uri, "", "адреса текста у прежней записи нет");
+    assert_eq!(j.prompt_hash, "ph");
+
+    // И узел прежней формы не берёт задания, пока не объявит адрес, —
+    // отказом, а не молча.
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::NoEndpoint), "вышло {err:?}");
+    announce(deps.as_mut(), EXEC, ENDPOINT);
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
 }
