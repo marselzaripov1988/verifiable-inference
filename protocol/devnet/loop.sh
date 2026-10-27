@@ -46,6 +46,9 @@ SHARE=$((FEE / 2))
 ZEROS=0000000000000000000000000000000000000000000000000000000000000000
 AAAAS=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 
+LOG=/work/log
+mkdir -p $LOG
+
 say() { echo; echo "===== $* ====="; }
 fail() { echo "ПРОВАЛ: $*" >&2; exit 1; }
 ok() { echo "ок: $*"; }
@@ -70,6 +73,29 @@ send() {
     h=$($B tx "$@" $TX | jq -r '.txhash')
     [ -n "$h" ] && [ "$h" != "null" ] || fail "транзакция не отправлена"
     wait_tx "$h" >/dev/null
+}
+
+# Сделка, которая ОБЯЗАНА быть отвергнута, и причина отказа.
+#
+# Отдельно от send не из симметрии: та падает на любом code!=0, а здесь
+# отказ и есть признак. Главное же — код читается из ДОСТАВЛЕННОЙ
+# транзакции: в ответе на отправку он всегда 0, потому что отправка лишь
+# кладёт сделку в очередь. Сверять его там значит не проверять ничего.
+expect_fail() {
+    want=$1; shift
+    h=$($B tx "$@" $TX | jq -r '.txhash')
+    [ -n "$h" ] && [ "$h" != "null" ] || fail "транзакция не отправлена"
+    i=0
+    while [ $i -lt 40 ]; do
+        sleep 1
+        out=$($B query tx --type=hash "$h" $Q 2>/dev/null) || { i=$((i+1)); continue; }
+        code=$(echo "$out" | jq -r '.code')
+        [ "$code" = "0" ] && fail "сделка прошла, а должна была быть отвергнута"
+        echo "$out" | jq -r '.raw_log' | grep -qi "$want" && return 0
+        echo "$out" | jq -r '.raw_log' >&2
+        fail "отказ не тот: ждали «$want»"
+    done
+    fail "транзакция $h не попала в блок"
 }
 
 bal() {
@@ -168,19 +194,42 @@ for n in $NODES; do
     # эталоном ровно на ноль.
     send wasm execute "$REG" "{\"submit_conformance\":{\"divergence_micro\":0,\"logprobs_hash\":\"$AAAAS\"}}" --from $n
 done
+# Адрес доставки объявляет САМ узел, и без него задания не дадут: связку
+# такого узла взять негде.
+#
+# n1 и n2 объявляют сделкой — ровно как велит руководство оператору, — и
+# оба готовы к одному моменту, так что гонка за единственным заданием
+# выйдет настоящей. n3 адрес не объявляет: это сделает его собственная
+# петля по флагу --endpoint, и второй путь проверяется тем же прогоном.
+send wasm execute "$REG" '{"set_endpoint":{"endpoint":"http://127.0.0.1:8081"}}' --from n1
+send wasm execute "$REG" '{"set_endpoint":{"endpoint":"http://127.0.0.1:8082"}}' --from n2
 for n in $NODES; do
     a=$($B keys show $n -a --keyring-backend test --home $D)
     st=$($B query wasm contract-state smart "$REG" "{\"executor\":{\"address\":\"$a\"}}" $Q | jq -r '.data.status')
     [ "$st" = "active" ] || fail "узел $n в состоянии $st"
 done
-ok "три узла активны, с залогом и пробой"
+A1=$($B keys show n1 -a --keyring-backend test --home $D)
+e1=$($B query wasm contract-state smart "$REG" "{\"executor\":{\"address\":\"$A1\"}}" $Q | jq -r '.data.endpoint')
+[ "$e1" = "http://127.0.0.1:8081" ] || fail "адрес n1 в цепочке: $e1"
+ok "три узла активны, с залогом и пробой; n1 объявил адрес $e1"
+
+# Задания без адреса доставки не дают — это проверяется ПРЯМО, а не на
+# веру: n2 адрес ещё не объявил, и контракт обязан ему отказать.
+expect_fail "адрес доставки не объявлен" \
+    wasm execute "$REG" "{\"claim_job\":{\"job_id\":1}}" --from n3
+ok "узлу без адреса доставки задания не дают — отказ от контракта"
 
 say "4. подставной vLLM и раздача связок"
 mkdir -p /work/prompts /work/b-n1 /work/b-n2 /work/b-n3 /work/state
 python3 /work/fake-vllm.py 8000 >/tmp/vllm.log 2>&1 &
-# Связки отдаются по http — тем же, чем их отдавал бы узел в сети.
+# Связки отдаются по http — тем же, чем их отдавал бы узел в сети. Все
+# три узла раздают свои: адрес каждого лежит в цепочке, и кто окажется
+# исполнителем, решат они сами.
 ( cd /work/b-n1 && python3 -m http.server 8081 >/tmp/h1.log 2>&1 & )
 ( cd /work/b-n2 && python3 -m http.server 8082 >/tmp/h2.log 2>&1 & )
+( cd /work/b-n3 && python3 -m http.server 8083 >/tmp/h3.log 2>&1 & )
+# Запросы раздаёт заказчик, и адрес этой раздачи он кладёт в задание.
+( cd /work/prompts && python3 -m http.server 8080 >/tmp/hp.log 2>&1 & )
 i=0
 while [ $i -lt 20 ]; do
     v=$(wget -qO- http://127.0.0.1:8000/version 2>/dev/null | jq -r '.version' 2>/dev/null || echo "")
@@ -188,7 +237,7 @@ while [ $i -lt 20 ]; do
     sleep 1; i=$((i+1))
 done
 [ "$v" = "0.31.0" ] || { cat /tmp/vllm.log; fail "подставной vLLM не поднялся"; }
-ok "vLLM отвечает версией $v, связки раздаются на 8081 и 8082"
+ok "vLLM отвечает версией $v, связки раздаются на 8081-8083, запросы на 8080"
 
 say "5. заказчик ставит задание — своим же кодом, не сценарием"
 # Это client.py, а не `wasmd tx` из сценария: проверяется в том числе то,
@@ -199,7 +248,7 @@ printf '%s' "$PROMPT" > /work/вопрос.txt
 JOB=$(python3 /work/daemon/client.py submit \
     --rest http://127.0.0.1:1317 --contract "$REG" \
     --prompt-file /work/вопрос.txt --price "$PRICE" \
-    --prompts /work/prompts \
+    --prompts /work/prompts --prompt-uri http://127.0.0.1:8080 \
     --send --key client --binary wasmd --home "$D" \
     --node tcp://127.0.0.1:26657 --chain-id "$CH" --gas-prices 0stake \
     2>/tmp/submit.err) || { cat /tmp/submit.err; fail "заказчик не поставил задание"; }
@@ -213,22 +262,38 @@ cb=$(bal "$REG")
 [ "$cb" = "$((TOTAL + MIN_STAKE * 3))" ] || fail "на контракте $cb, ожидалось $((TOTAL + MIN_STAKE * 3))"
 ok "задание $JOB объявлено заказчиком, состояние $stt, на контракте $cb"
 ok "запрос выложен под именем хэша: $PH.txt"
+uri=$(job_field prompt_uri)
+[ "$uri" = "http://127.0.0.1:8080" ] || fail "адрес запроса в задании: $uri"
+ok "адрес запроса лежит в самом задании: $uri"
+
+# Запрос списка заданий — тот, из-за которого узел больше не перебирает
+# номера. Проверяется до запуска петель: иначе отказ выглядел бы их бедой.
+jn=$($B query wasm contract-state smart "$REG" '{"next_job":{}}' $Q | jq -r '.data.next_job')
+[ "$jn" = "2" ] || fail "граница списка $jn, ожидалась 2"
+jl=$($B query wasm contract-state smart "$REG" '{"jobs":{}}' $Q | jq -r '.data.jobs|length')
+[ "$jl" = "1" ] || fail "список отдал $jl заданий, ожидалось 1"
+ok "список заданий отдаётся запросом: заданий $jl, граница $jn"
 
 say "6. запустить три петли и больше ничего не делать"
 for n in $NODES; do
     eval "B_$n=\$(bal \$($B keys show $n -a --keyring-backend test --home $D))"
 done
-# У каждого узла свои соседи, и нарочно разного вида: один по http,
-# другой каталогом. Оба пути доставки проверяются одним прогоном.
-peers_of() {
+# НИ --prompts, НИ --peers: ни один узел не знает ни адреса заказчика, ни
+# адресов соседей. Всё, что у них есть, — цепочка. Запрос они возьмут по
+# `prompt_uri` из задания, связку — по `endpoint` из записи исполнителя.
+#
+# Так проверяется именно то, ради чего правка делалась. Раньше эти адреса
+# передавались людьми: сценарий сам раздавал каждому узлу --peers соседей,
+# и прогон доказывал лишь то, что доставка работает, когда адреса ей
+# НАЗВАЛИ. Теперь не названо ничего.
+endpoint_of() {
     case $1 in
-        n1) echo "--peers http://127.0.0.1:8082 --peers /work/b-n3" ;;
-        n2) echo "--peers http://127.0.0.1:8081 --peers /work/b-n3" ;;
-        n3) echo "--peers http://127.0.0.1:8081 --peers http://127.0.0.1:8082" ;;
+        n1|n2) echo "" ;;
+        n3) echo "--endpoint http://127.0.0.1:8083" ;;
     esac
 }
 for n in $NODES; do
-    pp=$(peers_of "$n")
+    ee=$(endpoint_of "$n")
     # shellcheck disable=SC2086
     python3 /work/daemon/loop.py \
         --rest http://127.0.0.1:1317 --contract "$REG" \
@@ -237,9 +302,9 @@ for n in $NODES; do
         --send --key "$n" --binary wasmd --home "$D" \
         --node tcp://127.0.0.1:26657 --chain-id "$CH" \
         --gas-prices 0stake \
-        --prompts /work/prompts --bundles "/work/b-$n" $pp \
+        --bundles "/work/b-$n" $ee \
         --state "/work/state/$n.json" --every 3 --max-tokens 120 \
-        >"/tmp/$n.log" 2>&1 &
+        >"$LOG/$n.log" 2>&1 &
     eval "PID_$n=$!"
     echo "  $n запущен"
 done
@@ -256,7 +321,7 @@ done
 for n in $NODES; do eval "kill \$PID_$n 2>/dev/null" || true; done
 if [ "$stt" != "settled" ]; then
     echo "--- последнее состояние: $stt"
-    for n in $NODES; do echo "--- $n:"; tail -25 "/tmp/$n.log"; done
+    for n in $NODES; do echo "--- $n:"; tail -25 "$LOG/$n.log"; done
     fail "задание не дошло до вердикта само"
 fi
 ok "задание закрыто без единой команды извне, состояние $stt"
@@ -265,8 +330,8 @@ ok "задание закрыто без единой команды извне,
 # иначе узлы не увидели бы задания вовсе. Признак не обязательный:
 # на свежем каталоге отметки нет.
 for n in $NODES; do
-    if grep -q "указывает за край" "/tmp/$n.log"; then
-        echo "  $n: $(grep -m1 'указывает за край' /tmp/$n.log)"
+    if grep -q "указывает за край" "$LOG/$n.log"; then
+        echo "  $n: $(grep -m1 'указывает за край' $LOG/$n.log)"
     fi
 done
 
@@ -322,19 +387,51 @@ print(f"  связка: запрос сошёлся, ответ {len(b['answer']
       f"вектор {len(b['vector'])} элементов")
 PY
 # Проверяющие обязаны были взять её у исполнителя: своей по этому
-# заданию у них нет.
+# заданию у них нет. И взять ИМЕННО по адресу из цепочки — других им не
+# называли вовсе.
+WHO_URI=$($B query wasm contract-state smart "$REG" \
+    "{\"executor\":{\"address\":\"$EX\"}}" $Q | jq -r '.data.endpoint')
+[ -n "$WHO_URI" ] && [ "$WHO_URI" != "null" ] || fail "у исполнителя нет адреса"
 for n in $NODES; do
     [ "$n" = "$WHO" ] && continue
-    grep -q "связка получена из" "/tmp/$n.log" || fail "$n не брал связку"
-    echo "  $n: $(grep -m1 'связка получена из' /tmp/$n.log)"
+    grep -q "связка получена из" "$LOG/$n.log" || fail "$n не брал связку"
+    line=$(grep -m1 'связка получена из' "$LOG/$n.log")
+    echo "  $n: $line"
+    echo "$line" | grep -q "$WHO_URI" \
+        || fail "$n взял связку не по адресу из цепочки ($WHO_URI)"
 done
-ok "связка ушла от исполнителя к обоим проверяющим"
+ok "связка ушла по адресу из цепочки: $WHO_URI"
+
+# Запрос — так же: его адрес узлы взяли из задания, а не из флага.
+grep -q "запрос получен из http://127.0.0.1:8080" "$LOG/$WHO.log" \
+    || { grep -m1 "запрос получен из" "$LOG/$WHO.log"; fail "запрос взят не по адресу из задания"; }
+ok "запрос взят по адресу из задания — ни одного адреса узлам не называли"
+
+# И список заданий петля читала запросом, а не перебором номеров.
+grep -q "(список" "$LOG/$WHO.log" || { grep -m1 "заданий с" "$LOG/$WHO.log"; fail "петля шла перебором"; }
+echo "  $WHO: $(grep -m1 'заданий с' $LOG/$WHO.log)"
+ok "задания найдены запросом списка, а не перебором номеров"
+
+# Адрес n3 лежит в цепочке, хотя руками его никто не отправлял: это
+# сделала его петля по флагу --endpoint.
+A3=$($B keys show n3 -a --keyring-backend test --home $D)
+e3=$($B query wasm contract-state smart "$REG" "{\"executor\":{\"address\":\"$A3\"}}" $Q | jq -r '.data.endpoint')
+[ "$e3" = "http://127.0.0.1:8083" ] || fail "петля n3 не объявила адрес: $e3"
+grep -q "объявляем" "$LOG/n3.log" || fail "n3 не сообщил, что объявляет адрес"
+echo "  n3: $(grep -m1 'адрес доставки' $LOG/n3.log)"
+ok "адрес объявила сама петля — оператору это делать не обязательно"
+# А у кого адрес уже тот, сделки не шлёт: иначе каждый цикл стоил бы газа.
+for n in n1 n2; do
+    grep -q "объявляем" "$LOG/$n.log" && fail "$n объявлял адрес без надобности"
+done
+ok "совпадающий адрес заново не объявляется — газ не жжётся"
 
 say "10. заказчик забирает ответ и сверяет его с цепочкой"
+# Без --peers: заказчик тоже не знает, кто выполнил задание и где лежит
+# связка. Адрес исполнителя он спрашивает у цепочки.
 python3 /work/daemon/client.py collect \
     --rest http://127.0.0.1:1317 --contract "$REG" --job-id "$JOB" \
-    --peers http://127.0.0.1:8081 --peers http://127.0.0.1:8082 \
-    --peers /work/b-n3 --out /work/ответ.txt \
+    --out /work/ответ.txt \
     >/dev/null 2>/tmp/collect.err || { cat /tmp/collect.err; fail "заказчик не забрал ответ"; }
 grep -E "ВЕРДИКТ|получен из" /tmp/collect.err | sed 's/^/  /'
 grep -q "ВЕРДИКТ: ответ подтверждён" /tmp/collect.err \
@@ -351,9 +448,12 @@ say "11. гонка за заданием не ломает петлю"
 # пойти дальше, а не встать.
 raced=0
 for n in $NODES; do
-    grep -q "опоздали" "/tmp/$n.log" && raced=$((raced + 1))
+    grep -q "опоздали" "$LOG/$n.log" && raced=$((raced + 1))
 done
-[ "$raced" -ge 1 ] || fail "ни один узел не опоздал: гонки не было, проверять нечего"
+if [ "$raced" -lt 1 ]; then
+    for n in $NODES; do echo "--- $n:"; tail -30 "$LOG/$n.log"; done
+    fail "ни один узел не опоздал: гонки не было, проверять нечего"
+fi
 ok "опоздавших узлов $raced — отказ цепочки принят как обычный ход дела"
 
 say "ГОТОВО: заказчик поставил, узлы сделали, заказчик забрал — без человека"
