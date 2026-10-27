@@ -217,7 +217,8 @@ def main():
     p.add_argument("--base-url", required=True)
     p.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     p.add_argument("--dtype", default="bfloat16")
-    p.add_argument("--probe", default=PROBE_PATH)
+    p.add_argument("--probe", help="эталон пробы. По умолчанию берётся по "
+                                   "классу ИЗ ЦЕПОЧКИ")
     p.add_argument("--rest", help="REST цепочки")
     p.add_argument("--contract", help="адрес контракта")
     a = p.parse_args()
@@ -233,9 +234,28 @@ def main():
         print("ВНИМАНИЕ: без параметров из цепочки предел неизвестен — "
               "проба считается, но не оценивается", file=sys.stderr)
 
+    # Эталон выбирается по классу ИЗ ЦЕПОЧКИ, а не по умолчанию. Умолчание
+    # было эталоном sm_89, и оператору 3090 приходилось знать про --probe:
+    # не знал — получал отказ сверки, по которому неясно, что делать.
+    # Чужой эталон всё равно отвергается сверкой хэша, так что выбор здесь
+    # не ослабляет ничего, а только избавляет от лишнего флага.
+    probe = a.probe
+    if probe is None:
+        if params is None:
+            print("ОТКАЗ: без --rest и --contract эталон выбрать не из чего: "
+                  "укажите --probe", file=sys.stderr)
+            return 2
+        try:
+            probe = probe_path_for(params.pinned_arch)
+        except ProbeMismatch as e:
+            print(f"ОТКАЗ: {e}", file=sys.stderr)
+            return 1
+        print(f"эталон по классу из цепочки: {os.path.basename(probe)}",
+              file=sys.stderr)
+
     try:
         r = run(a.base_url, a.model, params=params, dtype=a.dtype,
-                probe_path=a.probe)
+                probe_path=probe)
     except ProbeMismatch as e:
         print(f"ОТКАЗ: {e}", file=sys.stderr)
         return 1
