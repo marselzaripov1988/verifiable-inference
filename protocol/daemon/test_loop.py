@@ -470,6 +470,15 @@ def test_plan_poryadok():
     ok(why and "адрес" in why[0], "сказано про адрес доставки")
     r, _ = loop.allowed_roles(p, record(endpoint=""), ("executor", "checker"))
     ok(r == ("checker",), "пустая строка — тот же случай, что None")
+    # А вот запись БЕЗ поля endpoint — это контракт формы 3, который
+    # адреса не спрашивает. Требуй его и здесь — узел на неперенесённом
+    # контракте перестал бы работать вовсе, хотя тому адрес не нужен.
+    old = record()
+    del old["endpoint"]
+    r, why = loop.allowed_roles(p, old, ("executor", "checker"))
+    ok(r == ("executor", "checker"),
+       f"на контракте без адресов узел работает как прежде (вышло {r})")
+    ok(why == [], "и жаловаться ему не на что")
 
 
 def test_dostavka_teksta():
@@ -619,6 +628,18 @@ def test_obyavlenie_adresa():
                         out=open(os.devnull, "w"))
         ok(lp4.announce_endpoint(None) is None,
            "незарегистрированному узлу адрес объявлять нечем")
+
+        # Контракт формы 3 сообщения set_endpoint не знает: сделка вернула
+        # бы unknown variant, и за газ, каждый цикл.
+        s5 = Catcher()
+        lp5 = loop.Loop("http://rest", "axm1c", s5, "http://vllm/v1",
+                        CFG["pinned_model"], endpoint=MY_URI,
+                        out=open(os.devnull, "w"))
+        old = record()
+        del old["endpoint"]
+        lp5.announce_endpoint(old)
+        ok(s5.sent == [],
+           "на контракте без адресов сделка не отправляется вовсе")
     finally:
         restore()
 

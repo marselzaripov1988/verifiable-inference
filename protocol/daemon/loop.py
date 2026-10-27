@@ -314,7 +314,14 @@ def allowed_roles(params, record, roles):
     # Адрес доставки проверяется ТАК ЖЕ, как залог, и по той же причине:
     # контракт его требует при взятии, а причина отвергнутой сделки
     # оператору не видна — видна только списанная плата за газ.
-    if not (record or {}).get("endpoint"):
+    #
+    # Но проверяется ТОЛЬКО если контракт о нём знает, и различие здесь
+    # не придирка: у записи формы 3 поля `endpoint` нет ВОВСЕ, а у формы 4
+    # оно есть и равно null, пока адрес не объявлен. Требуй адрес в обоих
+    # случаях — и узел на неперенесённом контракте перестал бы работать
+    # вообще, хотя тот адреса не спрашивает. Отсутствие ключа значит
+    # «контракт старый», null — «адрес не объявлен».
+    if record is not None and "endpoint" in record and not record["endpoint"]:
         return (tuple(r for r in roles if r != "executor"),
                 ["адрес доставки не объявлен: связку взять негде, заданий "
                  "не дадут. Отправьте set_endpoint — проверять можно и так"])
@@ -406,12 +413,19 @@ class Loop:
         """
         if not self.endpoint:
             return None
-        have = (record or {}).get("endpoint")
-        if have == self.endpoint:
-            return None
         if record is None:
             self.say("адрес не объявить: узел не зарегистрирован в контракте")
             return None
+        if "endpoint" not in record:
+            # Контракт формы 3: сообщения `set_endpoint` у него нет вовсе,
+            # и сделка вернулась бы `unknown variant` — за газ, каждый
+            # цикл. Адреса на таком контракте передаются людьми.
+            self.say("контракт адресов доставки не знает (код до переноса): "
+                     "--endpoint не отправляется")
+            return None
+        if record["endpoint"] == self.endpoint:
+            return None
+        have = record["endpoint"]
         self.say(f"адрес доставки: в цепочке {have or 'нет'}, у нас "
                  f"{self.endpoint} — объявляем")
         try:
