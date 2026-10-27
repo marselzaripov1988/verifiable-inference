@@ -20,6 +20,8 @@
 import base64
 import datetime
 import json
+import re
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 
@@ -45,6 +47,11 @@ class Params:
     #: не только имя единицы, но и КАК она платится.
     settlement: dict
     stake_denom: str
+    #: Минимальный залог. Нужен петле ДО отправки: контракт проверяет залог
+    #: при каждом взятии задания, и узел с недобором платил бы газ за
+    #: отказ каждый цикл вместо того, чтобы сказать оператору, чего не
+    #: хватает.
+    min_stake: int
     # --- проба на эталонном векторе ---
     conformance_limit_micro: int
     conformance_ref_hash: str
@@ -79,6 +86,16 @@ def query_smart(rest, contract, query, timeout=20):
     try:
         with urllib.request.urlopen(url, timeout=timeout) as r:
             return json.loads(r.read())["data"]
+    except urllib.error.HTTPError as e:
+        # ТЕЛО ошибки обязательно: в нём единственное место, где написано,
+        # ЧТО именно не так. Без него «HTTP Error 500» одинаково выглядит у
+        # несуществующего задания и у упавшего узла, а петле это надо
+        # различать — см. job_or_none.
+        try:
+            body = e.read().decode(errors="replace")[:400]
+        except Exception:
+            body = ""
+        raise ChainUnavailable(f"{url}: {e}: {body}") from e
     except Exception as e:
         raise ChainUnavailable(f"{url}: {e}") from e
 
@@ -94,7 +111,7 @@ def load_params(rest, contract):
     need = ("checks_required",
             "pinned_model", "pinned_runtime", "pinned_dtype",
             "pinned_arch", "kernel_cache_hash",
-            "settlement", "stake_denom",
+            "settlement", "stake_denom", "min_stake",
             "conformance_limit_micro", "conformance_ref_hash",
             "conformance_lens", "conformance_version",
             "claim_ttl_seconds", "check_ttl_seconds")
@@ -110,6 +127,7 @@ def load_params(rest, contract):
         kernel_cache_hash=d["kernel_cache_hash"],
         settlement=d["settlement"],
         stake_denom=d["stake_denom"],
+        min_stake=int(d["min_stake"]),
         conformance_limit_micro=int(d["conformance_limit_micro"]),
         conformance_ref_hash=d["conformance_ref_hash"],
         conformance_lens=tuple(int(x) for x in d["conformance_lens"]),
@@ -148,6 +166,37 @@ def conformance_problems(params, record):
 def load_job(rest, contract, job_id):
     """Задание из цепочки. Нужно затем, что в нём лежат ХЭШИ текста."""
     return query_smart(rest, contract, {"job": {"job_id": int(job_id)}})
+
+
+#: Чем «задания с таким номером нет» отличается от «цепочка не ответила».
+#:
+#: Различать обязательно, и это не придирка. У контракта НЕТ запроса списка
+#: заданий: в QueryMsg только `Job{job_id}`, а счётчик `NEXT_JOB` снаружи
+#: не виден. Значит петля ищет задания перебором номеров и останавливается
+#: на отсутствующем. Если считать отсутствием любую ошибку, то недоступный
+#: REST выглядел бы концом списка — петля решила бы, что заданий нет, и
+#: тихо простояла бы всю неисправность.
+#:
+#: Поэтому отсутствие опознаётся по тексту `cosmwasm`, а всё остальное
+#: остаётся недоступностью. Закрываемся в сторону осторожности: непонятный
+#: ответ — недоступность, то есть петля ждёт, а не делает выводы.
+JOB_MISSING = re.compile(
+    r"(state::Job|type:\s*\w+::state::Job|Job\s+not\s+found)", re.I)
+
+
+def job_or_none(rest, contract, job_id):
+    """Задание либо None, если задания с таким номером НЕТ.
+
+    Недоступность цепочки пробрасывается как есть — см. JOB_MISSING о том,
+    почему эти два случая нельзя смешивать.
+    """
+    try:
+        return load_job(rest, contract, job_id)
+    except ChainUnavailable as e:
+        s = str(e)
+        if "not found" in s.lower() and JOB_MISSING.search(s):
+            return None
+        raise
 
 
 def text_hash(text):
@@ -355,5 +404,16 @@ def due_message(job_id, job, params, now, checks=None):
 
 def load_checks(rest, contract, job_id):
     """Сколько проверок сдано по заданию."""
+    return len(checks_of(rest, contract, job_id))
+
+
+def checks_of(rest, contract, job_id):
+    """Сами проверки, с адресами сдавших.
+
+    Адреса нужны петле: вторую проверку на одно задание контракт
+    отвергает (`DuplicateCheck`), а узел после перезапуска не помнит, что
+    уже сдавал. Спрашивать цепочку дешевле, чем хранить своё — и
+    правдивее: своё может разойтись с её состоянием.
+    """
     d = query_smart(rest, contract, {"checks": {"job_id": int(job_id)}})
-    return len(d.get("checks") or [])
+    return list(d.get("checks") or [])
