@@ -197,7 +197,7 @@ def test_chain_params():
         "pinned_runtime": "vllm-0.31.0", "pinned_dtype": "bfloat16",
         "pinned_arch": "sm_89", "kernel_cache_hash": "3753554454f2c9b8",
         "settlement": {"cw20": "axm1uz…"}, "stake_denom": "uaxm",
-        "min_stake": "150000000",
+        "min_stake": "150000000", "verifier_fee_bps": 970,
         "conformance_limit_micro": "0",
         "conformance_ref_hash": "0" * 64,
         "conformance_lens": [3, 3],
@@ -602,7 +602,7 @@ def test_sroki_v_demonah():
         checks_required=2, pinned_model="m", pinned_runtime="r",
         pinned_dtype="bfloat16", pinned_arch="sm_89", kernel_cache_hash="k",
         settlement={"native": "uaxm"}, stake_denom="uaxm",
-        min_stake=150_000_000,
+        min_stake=150_000_000, verifier_fee_bps=970,
         conformance_limit_micro=0, conformance_ref_hash="x" * 64,
         conformance_lens=(3,), conformance_version=1,
         claim_ttl_seconds=600, check_ttl_seconds=3600)

@@ -26,6 +26,7 @@
 и подписывает вне узла (РАЗВЁРТЫВАНИЕ.md).
 """
 
+import base64
 import json
 import re
 import shutil
@@ -98,6 +99,35 @@ def classify(text):
     return "fatal"
 
 
+def attribute(res, key, event="wasm"):
+    """Значение атрибута из событий сделки. None — нет такого.
+
+    Нужно затем, что номер задания присваивает контракт: заказчик платит,
+    а какой номер вышел — узнаёт только из события `wasm`. Угадывать его
+    по счётчику нельзя, между чтением и отправкой задание мог поставить
+    кто-то другой.
+
+    Ключи в cosmos-sdk 0.50 приходят простыми строками, но в более старых
+    ответах они бывают в base64. Разбираются оба вида: разойдись это с
+    версией узла, заказчик молча не узнал бы свой номер.
+    """
+    if not isinstance(res, dict):
+        return None
+    for ev in res.get("events") or []:
+        if event and ev.get("type") != event:
+            continue
+        for a in ev.get("attributes") or []:
+            k, v = a.get("key"), a.get("value")
+            if k == key:
+                return v
+            try:
+                if base64.b64decode(k or "", validate=True).decode() == key:
+                    return base64.b64decode(v or "", validate=True).decode()
+            except Exception:
+                pass
+    return None
+
+
 class DryRun:
     """Печатает сообщения вместо отправки.
 
@@ -113,8 +143,8 @@ class DryRun:
     def address(self):
         return "axm1dryrun"
 
-    def send(self, msg, funds=None):
-        self.sent.append({"msg": msg, "funds": funds})
+    def send(self, msg, funds=None, contract=None):
+        self.sent.append({"msg": msg, "funds": funds, "contract": contract})
         print(json.dumps(msg, ensure_ascii=False), file=self.out)
         return {"txhash": None, "dry": True}
 
@@ -193,13 +223,17 @@ class Axmd:
 
     # --- отправка ---------------------------------------------------------
 
-    def send(self, msg, funds=None):
+    def send(self, msg, funds=None, contract=None):
         """Отправить сообщение и ДОЖДАТЬСЯ `code=0`.
 
         Возврат — разобранная сделка. Любой иной исход — исключение:
         петля не должна продолжать, считая сделанным отвергнутое.
+
+        `contract` переопределяет адрес. Нужно для расчёта CW20: там
+        заказчик платит не реестру, а токену — `Send` на токен с
+        вложенным сообщением, — и это единственный путь для тех денег.
         """
-        args = ["tx", "wasm", "execute", self.contract,
+        args = ["tx", "wasm", "execute", contract or self.contract,
                 json.dumps(msg, ensure_ascii=False, separators=(",", ":")),
                 "--from", self.key, "--chain-id", self.chain_id,
                 "--gas", "auto", "--gas-adjustment", self.gas_adjustment,
@@ -254,6 +288,10 @@ class Axmd:
             if code != 0:
                 raise TxFailed(f"{txhash}: code={code}: "
                                f"{res.get('raw_log', '')[:400]}")
-            return {"txhash": txhash, "height": res.get("height"), "code": 0}
+            # Сама сделка отдаётся целиком: в её событиях лежит номер
+            # созданного задания, и заказчику больше взять его негде —
+            # номер присваивает контракт, а не тот, кто платил.
+            return {"txhash": txhash, "height": res.get("height"), "code": 0,
+                    "tx": res}
         raise TxFailed(f"{txhash}: за {self.wait} с не попала в блок. "
                        f"Последнее: {last[:200]}")

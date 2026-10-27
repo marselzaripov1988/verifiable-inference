@@ -52,6 +52,11 @@ class Params:
     #: отказ каждый цикл вместо того, чтобы сказать оператору, чего не
     #: хватает.
     min_stake: int
+    #: Доля проверяющих в базисных пунктах. Нужна ЗАКАЗЧИКУ: он платит её
+    #: сверх цены, и контракт требует точную сумму — `price + доля`, ни
+    #: больше, ни меньше. Считать её по своему представлению о доле
+    #: значило бы получать отказ за газ при каждой смене настройки.
+    verifier_fee_bps: int
     # --- проба на эталонном векторе ---
     conformance_limit_micro: int
     conformance_ref_hash: str
@@ -111,7 +116,7 @@ def load_params(rest, contract):
     need = ("checks_required",
             "pinned_model", "pinned_runtime", "pinned_dtype",
             "pinned_arch", "kernel_cache_hash",
-            "settlement", "stake_denom", "min_stake",
+            "settlement", "stake_denom", "min_stake", "verifier_fee_bps",
             "conformance_limit_micro", "conformance_ref_hash",
             "conformance_lens", "conformance_version",
             "claim_ttl_seconds", "check_ttl_seconds")
@@ -128,6 +133,7 @@ def load_params(rest, contract):
         settlement=d["settlement"],
         stake_denom=d["stake_denom"],
         min_stake=int(d["min_stake"]),
+        verifier_fee_bps=int(d["verifier_fee_bps"]),
         conformance_limit_micro=int(d["conformance_limit_micro"]),
         conformance_ref_hash=d["conformance_ref_hash"],
         conformance_lens=tuple(int(x) for x in d["conformance_lens"]),
@@ -161,6 +167,19 @@ def conformance_problems(params, record):
         return [f"проба снята против эталона версии {have}, "
                 f"сейчас {params.conformance_version} — нужна заново"]
     return []
+
+
+def fee_for(price, bps):
+    """Доля проверяющих, которую заказчик платит СВЕРХУ цены.
+
+    Деление с округлением ВВЕРХ — ровно как в контракте
+    (`fee_for` в contract.rs). Разойдись округление на единицу, и контракт
+    отвергнет сумму целиком: он требует `price + доля` точно, а не
+    «примерно». Поэтому считается здесь один раз и этим же кодом для
+    родного расчёта и для CW20.
+    """
+    price, bps = int(price), int(bps)
+    return (price * bps + 9_999) // 10_000
 
 
 def load_job(rest, contract, job_id):
