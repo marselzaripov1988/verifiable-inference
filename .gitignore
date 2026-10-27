@@ -29,3 +29,7 @@ research/axiome-devnet/stargate-probe/artifacts/
 
 # Каталог сборки стенда: клон узла и его Dockerfile, воспроизводимо.
 research/axiome-devnet/.stand/
+
+# Рабочий каталог прогона петли на девнете: копии демонов, артефакт,
+# связки и состояние узлов. Создаётся заново одной командой.
+protocol/devnet/.stand/
