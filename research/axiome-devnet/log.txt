@@ -1,0 +1,51 @@
+Стенд Axiome: три правки к узлу, проверенные исполнением.
+Прогон 27 октября 2026, axm-node v2.2.1 (6e481f6fc369786053ba6e451225ca780e3c387f).
+Артефакт пробника sha256 5c81e88c0605255fd9413acd46260ca2a8cc11c6dc039f56523a0ff0a1981456.
+
+############ 1. ИСПРАВЛЕННЫЙ УЗЕЛ ############
+=== 0. цепочка
+ок: узел работает, высота 2, v2.2.1+stargate+burner
+
+=== правка 3: модульный счёт wasm
+{"name":"wasm","address":"axm1xds4f0m87ajl3a6az6s2enhxrd0wta48ywgndc","permissions":["burner"]}
+ок: счёт wasm есть, право burner при нём
+
+=== правка 1: загрузка контракта с requires_stargate
+артефакт: 5c81e88c0605255fd9413acd46260ca2a8cc11c6dc039f56523a0ff0a1981456  /work/stargate_probe.wasm
+ок: код 1 загружен, газ 1009096
+ок: экземпляр axm14hj2tavq8fpesdwxxcu44rty3hh90vhujrvcmstl4zr3txmfvw9sletw5k
+
+=== правка 2: запрос к x/referral из контракта
+{"info":{"status":"STATUS_NEW","referrer":"axm1rkk2x2jedsdkmckyrxzjx9tdtavnqwlpqf3yts","active":false,"active_ref_counts":["0","0","0","0","0","0","0","0","0","0","0","0","0","0","0"],"status_downgrade_at":null,"self_delegated":"0","team_delegated":"0","active_count":{"first_line":0,"first_line_by3":0,"team0":0,"team15":0,"team50":0,"team100":0,"team300":0}}}
+ок: модуль ответил через контракт, реферер BOB совпал с деревом генезиса
+ок: чужой запрос не проходит
+
+=== правка 3 на исполнении: BankMsg::Burn
+блок 5 без сжигания: выпуск упал на 150000 uaxm (это сбор)
+событие burn: 1000000uaxm
+блок 6 со сжиганием: выпуск упал на 1150000 uaxm
+чистое сжигание контракта: 1000000 uaxm
+ок: контракт сжёг ровно присланное, выпуск уменьшился на эту сумму
+
+=== итог: все три правки работают на исполнении
+КОД ВЫХОДА: 0
+
+############ 2. ВЫПУЩЕННЫЙ ДВОИЧНЫЙ ФАЙЛ ############
+=== 0. официальный двоичный файл
+/tmp/axmd-original: OK
+ок: v2.2.1 совпал по sha256 с выпуском v2.2.1
+
+=== 1. набор возможностей у выпуска и у стенда
+выпуск: iterator,staking,distribution,cosmwasm_1_1,cosmwasm_1_2,cosmwasm_1_3,cosmwasm_1_4
+стенд:  iterator,staking,distribution,stargate,cosmwasm_1_1,cosmwasm_1_2,cosmwasm_1_3,cosmwasm_1_4
+
+=== 2. своя цепочка на официальном узле
+ок: официальный узел работает, высота 2
+
+=== 3. загрузка того же контракта
+{"code":0,"codespace":"","txhash":"A1B01509BDE796FB8FBBA2A8934190D3F65DF328A95D2FEFEA41FA5DD548176D","raw_log":""}
+{"height":"3","code":2,"codespace":"wasm","gas_used":"1000763","raw_log":"failed to execute message; message index: 0: Error calling the VM: Error during static Wasm validation: Wasm contract requires unavailable capabilities: {\"stargate\"}: create wasm contract failed"}
+ок: загрузка отвергнута при исполнении: нет возможности stargate
+
+=== итог: один и тот же контракт — на выпуске отказ, на стенде загрузка
+КОД ВЫХОДА: 0

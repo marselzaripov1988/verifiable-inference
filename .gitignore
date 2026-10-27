@@ -20,3 +20,12 @@ __pycache__/
 # так же воспроизводима и так же не нужна в репозитории. Пересобирается
 # одной командой из РАЗВЁРТЫВАНИЕ.md.
 protocol/contract/deploy/unsigned/1-store-unsigned.json
+
+# То же для контракта-пробника со стенда Axiome: артефакт воспроизводим
+# из его Cargo.lock тем же cosmwasm/optimizer.
+research/axiome-devnet/stargate-probe/target/
+research/axiome-devnet/stargate-probe/target-native/
+research/axiome-devnet/stargate-probe/artifacts/
+
+# Каталог сборки стенда: клон узла и его Dockerfile, воспроизводимо.
+research/axiome-devnet/.stand/

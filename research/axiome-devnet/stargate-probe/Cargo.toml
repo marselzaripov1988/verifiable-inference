@@ -1,0 +1,37 @@
+[package]
+name = "stargate-probe"
+version = "0.1.0"
+edition = "2021"
+
+# Пробник для стенда: ровно три вещи, которые просим у площадки.
+#
+# 1. Возможность `stargate` — она объявляется этим контрактом, и на
+#    неисправленном узле он не загрузится вовсе.
+# 2. Запрос к `x/referral` из контракта — отдаётся сырым, как ответила
+#    цепочка, чтобы в замере было видно её ответ, а не наш разбор.
+# 3. `BankMsg::Burn` — сжигает то, что пришло со сделкой.
+#
+# CosmWasm 1.x, не 2.x: у Axiome wasmd 0.50.0 с wasmvm 1.5.0.
+[dependencies]
+cosmwasm-std = { version = "1.5", features = ["stargate"] }
+cosmwasm-schema = "1.5"
+
+# Прижаты по той же причине, что и в основном контракте: приходят
+# транзитивно через cosmwasm-crypto -> k256 -> der, а версии от 1.7
+# требуют edition2024, которого нет в Rust 1.78 внутри cosmwasm/optimizer.
+base64ct = "=1.6.0"
+zeroize = "=1.8.1"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = "z"
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+incremental = false
+overflow-checks = true
