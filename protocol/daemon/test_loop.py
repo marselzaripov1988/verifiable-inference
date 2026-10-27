@@ -35,6 +35,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import canon  # noqa: E402
 import chain  # noqa: E402
+import delivery  # noqa: E402
 import loop  # noqa: E402
 import tx  # noqa: E402
 
@@ -69,7 +70,7 @@ CFG = {
     "pinned_runtime": "vllm-0.31.0", "pinned_dtype": "bfloat16",
     "pinned_arch": "sm_89", "kernel_cache_hash": "3753554454f2c9b8",
     "settlement": {"native": "uaxm"}, "stake_denom": "uaxm",
-    "min_stake": "150000000",
+    "min_stake": "150000000", "verifier_fee_bps": 970,
     "conformance_limit_micro": "0",
     "conformance_ref_hash": "0" * 64,
     "conformance_lens": [3, 3],
@@ -321,24 +322,24 @@ def test_dostavka_teksta():
         with open(os.path.join(good, "1.txt"), "w", encoding="utf-8") as f:
             f.write(prompt)
 
-        raw, src, why = loop.fetch_verified([bad], "1.txt", loop.prompt_check(j))
+        raw, src, why = delivery.fetch_verified([bad], "1.txt", delivery.prompt_check(j))
         ok(raw is None, "подменённый запрос не берётся")
         ok(why and "хэш запроса не тот" in why[0], "сказано, что хэш не тот")
 
-        raw, src, why = loop.fetch_verified([bad, good], "1.txt",
-                                           loop.prompt_check(j))
-        ok(raw is not None and src == good,
+        raw, src, why = delivery.fetch_verified([bad, good], "1.txt",
+                                           delivery.prompt_check(j))
+        ok(raw is not None and src.startswith(good),
            "при нескольких источниках берётся сошедшийся")
-        ok(loop.prompt_text(raw, j) == prompt, "текст тот самый")
+        ok(delivery.prompt_text(raw, j) == prompt, "текст тот самый")
 
         # Хвостовой перевод строки: редактор добавляет его сам, и решает
         # всё равно хэш из цепочки, а не мы.
         with open(os.path.join(good, "2.txt"), "w", encoding="utf-8") as f:
             f.write(prompt + "\n")
-        raw, src, why = loop.fetch_verified([good], "2.txt",
-                                           loop.prompt_check(j))
+        raw, src, why = delivery.fetch_verified([good], "2.txt",
+                                           delivery.prompt_check(j))
         ok(raw is not None, "файл с переводом строки на конце принят")
-        ok(loop.prompt_text(raw, j) == prompt,
+        ok(delivery.prompt_text(raw, j) == prompt,
            "в работу идёт тот вид, что сошёлся с цепочкой")
 
         print("\n### связка проверяющего — тоже только сошедшаяся")
@@ -358,16 +359,16 @@ def test_dostavka_teksta():
         with open(os.path.join(bad, "2.json"), "w", encoding="utf-8") as f:
             f.write("{не json")
 
-        raw, src, why = loop.fetch_verified([bad], "1.json", loop.bundle_check(ja))
+        raw, src, why = delivery.fetch_verified([bad], "1.json", delivery.bundle_check(ja))
         ok(raw is None, "связка с подменённым ответом отвергнута")
         ok(why and "ответ не тот" in why[0], "названа причина: ответ не тот")
-        raw, src, why = loop.fetch_verified([bad, good], "1.json",
-                                           loop.bundle_check(ja))
-        ok(src == good, "берётся у того, кто отдал верную")
-        raw, src, why = loop.fetch_verified([bad], "2.json", loop.bundle_check(ja))
+        raw, src, why = delivery.fetch_verified([bad, good], "1.json",
+                                           delivery.bundle_check(ja))
+        ok(src.startswith(good), "берётся у того, кто отдал верную")
+        raw, src, why = delivery.fetch_verified([bad], "2.json", delivery.bundle_check(ja))
         ok(raw is None and "JSON" in why[0], "испорченный файл — отказ с причиной")
-        raw, src, why = loop.fetch_verified([os.path.join(d, "нет")], "1.json",
-                                            loop.bundle_check(ja))
+        raw, src, why = delivery.fetch_verified([os.path.join(d, "нет")], "1.json",
+                                            delivery.bundle_check(ja))
         ok(raw is None and "не прочитано" in why[0],
            "отсутствие источника названо отдельно от подмены")
 
@@ -434,7 +435,50 @@ def test_tsikl_cherez_podstavnuyu_tsepochku():
             ok(json.load(open(st, encoding="utf-8"))["from_id"] == 2,
                "отметка сдвинулась на первое незакрытое")
 
+            print("\n### отметка за краем цепочки не делает узел слепым")
+            # Файл состояния переехал с другой сети: отметка 9, а в
+            # цепочке только задание 1. Без исправления узел не увидит
+            # его никогда — и будет при этом молчать. Поймано прогоном
+            # стенда, где переиспользовали рабочий каталог.
+            install(FakeChain({1: job("open")}))
+            with open(st, "w", encoding="utf-8") as fh:
+                json.dump({"from_id": 9}, fh)
+            lp2 = loop.Loop("http://rest", "axm1c", sender,
+                            "http://vllm/v1", CFG["pinned_model"],
+                            bundles=os.path.join(d, "bundles"),
+                            state_path=st, out=open(os.devnull, "w"))
+            r = lp2.cycle()
+            ok([s["do"] for s in r["sent"]] == ["claim_job"],
+               "узел нашёл задание, хотя отметка была за краем")
+            ok(json.load(open(st, encoding="utf-8"))["from_id"] == 1,
+               "отметка сброшена к началу")
+            # Тот самый случай с прогона: отметка 2, а задание 1 в новой
+            # цепочке ОТКРЫТО. Существование задания под отметкой тут
+            # подтверждается — и проверки «существует» не хватает.
+            install(FakeChain({1: job("open")}))
+            with open(st, "w", encoding="utf-8") as fh:
+                json.dump({"from_id": 2}, fh)
+            r = loop.Loop("http://rest", "axm1c", sender, "http://vllm/v1",
+                          CFG["pinned_model"],
+                          bundles=os.path.join(d, "bundles"), state_path=st,
+                          out=open(os.devnull, "w")).cycle()
+            ok([s["do"] for s in r["sent"]] == ["claim_job"],
+               "отметка за НЕзакрытым заданием тоже сбрасывается")
+            # А вот при ЖИВОЙ отметке лишнего обхода быть не должно:
+            # задание под from_id-1 на месте, значит отметка своя.
+            f4 = FakeChain({1: job("settled")})
+            install(f4)
+            with open(st, "w", encoding="utf-8") as fh:
+                json.dump({"from_id": 2}, fh)
+            loop.Loop("http://rest", "axm1c", sender, "http://vllm/v1",
+                      CFG["pinned_model"], state_path=st,
+                      out=open(os.devnull, "w")).cycle()
+            ok(json.load(open(st, encoding="utf-8"))["from_id"] == 2,
+               "своя отметка не сбрасывается от пустой очереди")
+
             print("\n### недоступная цепочка не двигает отметку и не врёт")
+            with open(st, "w", encoding="utf-8") as fh:
+                json.dump({"from_id": 2}, fh)
             f2 = FakeChain({2: job("open")}, broken=[2])
             install(f2)
             try:

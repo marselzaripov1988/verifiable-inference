@@ -1,5 +1,9 @@
 #!/bin/sh
-# ПЕТЛЯ НА НАСТОЯЩЕЙ ЦЕПОЧКЕ. Три узла, никто ими не правит.
+# ПРОТОКОЛ ЦЕЛИКОМ НА НАСТОЯЩЕЙ ЦЕПОЧКЕ, без человека в середине.
+#
+# Заказчик ставит задание своим же кодом (client.py), три узла работают
+# своими петлями (loop.py), заказчик забирает ответ и сверяет его с
+# цепочкой. Сценарий после запуска не правит никем и ничем.
 #
 # Чего не проверяют подставные тесты. Там подменена цепочка, и проверяется
 # решение петли по снимку. Здесь цепочка настоящая — wasmd 0.50.0 с
@@ -73,9 +77,18 @@ bal() {
     echo "${v:-0}"
 }
 
+#: Номер задания присваивает контракт, а не сценарий: заказчик узнаёт его
+#: из события сделки. До постановки он неизвестен.
+JOB=""
+
 job_field() {
-    $B query wasm contract-state smart "$REG" "{\"job\":{\"job_id\":1}}" $Q \
-        | jq -r ".data.$1"
+    $B query wasm contract-state smart "$REG" \
+        "{\"job\":{\"job_id\":${JOB:-1}}}" $Q | jq -r ".data.$1"
+}
+
+checks_field() {
+    $B query wasm contract-state smart "$REG" \
+        "{\"checks\":{\"job_id\":${JOB:-1}}}" $Q | jq -r "$1"
 }
 
 say "1. поднять цепочку"
@@ -177,16 +190,29 @@ done
 [ "$v" = "0.31.0" ] || { cat /tmp/vllm.log; fail "подставной vLLM не поднялся"; }
 ok "vLLM отвечает версией $v, связки раздаются на 8081 и 8082"
 
-say "5. заказчик ставит задание"
+say "5. заказчик ставит задание — своим же кодом, не сценарием"
+# Это client.py, а не `wasmd tx` из сценария: проверяется в том числе то,
+# что заказчик сам считает сумму (цена плюс доля, округление вверх) и
+# сам выкладывает запрос до отправки.
 PROMPT="Опиши по шагам, что происходит при отправке транзакции в блокчейне."
-printf '%s' "$PROMPT" > /work/prompts/1.txt
-PH=$(python3 -c "import hashlib,sys;print(hashlib.sha256(open('/work/prompts/1.txt','rb').read()).hexdigest())")
-send wasm execute "$REG" "{\"submit_job\":{\"prompt_hash\":\"$PH\",\"price\":\"$PRICE\"}}" --amount ${TOTAL}stake --from client
+printf '%s' "$PROMPT" > /work/вопрос.txt
+JOB=$(python3 /work/daemon/client.py submit \
+    --rest http://127.0.0.1:1317 --contract "$REG" \
+    --prompt-file /work/вопрос.txt --price "$PRICE" \
+    --prompts /work/prompts \
+    --send --key client --binary wasmd --home "$D" \
+    --node tcp://127.0.0.1:26657 --chain-id "$CH" --gas-prices 0stake \
+    2>/tmp/submit.err) || { cat /tmp/submit.err; fail "заказчик не поставил задание"; }
+grep -E "цена|хэш" /tmp/submit.err | sed 's/^/  /'
+[ "$JOB" = "1" ] || { cat /tmp/submit.err; fail "номер задания $JOB, ожидался 1"; }
+PH=$(python3 -c "import hashlib;print(hashlib.sha256(open('/work/вопрос.txt','rb').read()).hexdigest())")
+[ -f "/work/prompts/$PH.txt" ] || fail "запрос не выложен под именем хэша"
 stt=$(job_field state)
 [ "$stt" = "open" ] || fail "задание в состоянии $stt"
 cb=$(bal "$REG")
 [ "$cb" = "$((TOTAL + MIN_STAKE * 3))" ] || fail "на контракте $cb, ожидалось $((TOTAL + MIN_STAKE * 3))"
-ok "задание 1 объявлено, состояние $stt, на контракте $cb"
+ok "задание $JOB объявлено заказчиком, состояние $stt, на контракте $cb"
+ok "запрос выложен под именем хэша: $PH.txt"
 
 say "6. запустить три петли и больше ничего не делать"
 for n in $NODES; do
@@ -234,15 +260,24 @@ if [ "$stt" != "settled" ]; then
     fail "задание не дошло до вердикта само"
 fi
 ok "задание закрыто без единой команды извне, состояние $stt"
+# Если рабочий каталог переиспользован, у узлов осталась отметка
+# просмотра с прошлой цепочки. Она обязана была исправиться сама —
+# иначе узлы не увидели бы задания вовсе. Признак не обязательный:
+# на свежем каталоге отметки нет.
+for n in $NODES; do
+    if grep -q "указывает за край" "/tmp/$n.log"; then
+        echo "  $n: $(grep -m1 'указывает за край' /tmp/$n.log)"
+    fi
+done
 
 say "8. сверить, ЧТО именно сделали узлы"
 g=$(job_field guilty)
 [ "$g" = "false" ] || fail "вердикт guilty=$g, ожидался false"
 ok "вердикт: не виновен — узлы одного класса сошлись хэшами"
 
-nchecks=$($B query wasm contract-state smart "$REG" '{"checks":{"job_id":1}}' $Q | jq -r '.data.checks|length')
+nchecks=$(checks_field '.data.checks|length')
 [ "$nchecks" = "2" ] || fail "проверок $nchecks, ожидалось 2"
-mis=$($B query wasm contract-state smart "$REG" '{"checks":{"job_id":1}}' $Q | jq -r '.data.mismatched')
+mis=$(checks_field '.data.mismatched')
 [ "$mis" = "0" ] || fail "несовпавших хэшей $mis, ожидалось 0"
 ok "проверок $nchecks, несовпавших хэшей $mis"
 
@@ -276,11 +311,11 @@ left=$(bal "$REG")
 ok "на контракте остались только залоги: $left"
 
 say "9. связки действительно ходили между узлами"
-[ -f "/work/b-$WHO/1.json" ] || fail "исполнитель не положил связку"
-python3 - "$WHO" "$PH" <<'PY' || fail "связка не та"
+[ -f "/work/b-$WHO/$JOB.json" ] || fail "исполнитель не положил связку"
+python3 - "$WHO" "$PH" "$JOB" <<'PY' || fail "связка не та"
 import hashlib, json, sys
-who, ph = sys.argv[1], sys.argv[2]
-b = json.load(open(f"/work/b-{who}/1.json", encoding="utf-8"))
+who, ph, job = sys.argv[1], sys.argv[2], sys.argv[3]
+b = json.load(open(f"/work/b-{who}/{job}.json", encoding="utf-8"))
 assert b["prompt_hash"] == ph, "в связке не тот запрос"
 assert hashlib.sha256(b["answer"].encode()).hexdigest() == b["answer_hash"]
 print(f"  связка: запрос сошёлся, ответ {len(b['answer'])} символов, "
@@ -295,7 +330,23 @@ for n in $NODES; do
 done
 ok "связка ушла от исполнителя к обоим проверяющим"
 
-say "10. гонка за заданием не ломает петлю"
+say "10. заказчик забирает ответ и сверяет его с цепочкой"
+python3 /work/daemon/client.py collect \
+    --rest http://127.0.0.1:1317 --contract "$REG" --job-id "$JOB" \
+    --peers http://127.0.0.1:8081 --peers http://127.0.0.1:8082 \
+    --peers /work/b-n3 --out /work/ответ.txt \
+    >/dev/null 2>/tmp/collect.err || { cat /tmp/collect.err; fail "заказчик не забрал ответ"; }
+grep -E "ВЕРДИКТ|получен из" /tmp/collect.err | sed 's/^/  /'
+grep -q "ВЕРДИКТ: ответ подтверждён" /tmp/collect.err \
+    || { cat /tmp/collect.err; fail "заказчику не сказали про вердикт"; }
+# Независимая сверка: заказчик сверяет сам, но признак должен быть и у
+# сценария — иначе проверяется только то, что он себе не противоречит.
+AH=$(job_field answer_hash)
+GOT=$(python3 -c "import hashlib;print(hashlib.sha256(open('/work/ответ.txt','rb').read()).hexdigest())")
+[ "$GOT" = "$AH" ] || fail "записанный ответ не тот: $GOT против $AH в цепочке"
+ok "ответ записан и сошёлся с хэшем из цепочки: $(wc -c < /work/ответ.txt) байт"
+
+say "11. гонка за заданием не ломает петлю"
 # Двое из трёх обязаны были опоздать: задание одно. Петля должна была
 # пойти дальше, а не встать.
 raced=0
@@ -305,4 +356,4 @@ done
 [ "$raced" -ge 1 ] || fail "ни один узел не опоздал: гонки не было, проверять нечего"
 ok "опоздавших узлов $raced — отказ цепочки принят как обычный ход дела"
 
-say "ГОТОВО: петля провела задание от объявления до вердикта сама"
+say "ГОТОВО: заказчик поставил, узлы сделали, заказчик забрал — без человека"

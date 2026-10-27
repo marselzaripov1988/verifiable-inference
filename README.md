@@ -38,10 +38,11 @@ python protocol/test_verify.py                 # правило на сохра�
 python protocol/daemon/test_canon.py           # канон кодирования
 python protocol/daemon/test_daemons.py         # демоны
 python protocol/daemon/test_loop.py            # петля узла
+python protocol/daemon/test_client.py          # заказчик
 python -m unittest discover -s gateway/tests   # шлюз
 docker run --rm -v "$PWD/protocol/contract:/w" -w /w rust:slim cargo test
 sh protocol/devnet/run.sh                      # полный цикл на настоящем wasmd
-sh protocol/devnet/run-loop.sh                 # три узла проводят задание сами
+sh protocol/devnet/run-loop.sh                 # заказчик и три узла, без человека
 ```
 
 `test_verify.py` не выдумывает данные: он берёт сохранённые векторы

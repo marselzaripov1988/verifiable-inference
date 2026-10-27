@@ -59,10 +59,10 @@ import json
 import os
 import sys
 import time
-import urllib.request
 
 import chain
 import checker
+import delivery
 import executor
 import tx
 
@@ -136,86 +136,6 @@ def save_state(path, state):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f)
     os.replace(tmp, path)
-
-
-# --- доставка текста ------------------------------------------------------
-
-def read_source(src, name, timeout=30):
-    """Один источник: каталог на диске либо http(s)-адрес."""
-    if src.startswith(("http://", "https://")):
-        url = f"{src.rstrip('/')}/{name}"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "verifiable-inference-loop/0.1"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8")
-    with open(os.path.join(src, name), encoding="utf-8") as f:
-        return f.read()
-
-
-def fetch_verified(sources, name, check, timeout=30):
-    """Взять `name` из любого источника и проверить ПО ЦЕПОЧКЕ.
-
-    Возвращает (данные, источник, причины отказов). Данные None — ни один
-    источник не дал того, что сходится с цепочкой; причины перечислены
-    все, потому что «связка не найдена» и «связка не та» требуют от
-    оператора разного.
-
-    Порядок источников — порядок предпочтения, но доверия здесь нет ни к
-    одному: решает сверка с хэшем из задания.
-    """
-    why = []
-    for src in sources:
-        try:
-            raw = read_source(src, name, timeout)
-        except Exception as e:
-            why.append(f"{src}: не прочитано: {e}")
-            continue
-        bad = check(raw)
-        if bad:
-            why.append(f"{src}: {bad}")
-            continue
-        return raw, src, why
-    return None, None, why
-
-
-def prompt_check(job):
-    """Проверка запроса: его хэш обязан совпасть с хэшем из задания.
-
-    Хвостовой перевод строки пробуется ОТДЕЛЬНО, и это не догадка:
-    решает хэш из цепочки, а не мы. Нужно затем, что редактор и `echo`
-    добавляют его сами, и совпадающий по смыслу файл давал бы отказ.
-    """
-    def check(raw):
-        want = job.get("prompt_hash")
-        if not want:
-            return "в задании нет хэша запроса: сверять нечем"
-        if chain.text_hash(raw) == want:
-            return None
-        if raw.endswith("\n") and chain.text_hash(raw[:-1]) == want:
-            return None
-        return f"хэш запроса не тот: цепочка ждёт {want}"
-    return check
-
-
-def prompt_text(raw, job):
-    """Тот из двух видов запроса, который сошёлся с цепочкой."""
-    if chain.text_hash(raw) == job.get("prompt_hash"):
-        return raw
-    return raw[:-1]
-
-
-def bundle_check(job):
-    """Проверка связки: запрос И ответ обязаны сойтись с заданием."""
-    def check(raw):
-        try:
-            b = json.loads(raw)
-        except ValueError as e:
-            return f"не разобрано как JSON: {e}"
-        if not isinstance(b, dict) or "prompt" not in b or "answer" not in b:
-            return "в связке нет запроса или ответа"
-        bad = chain.job_problems(job, b["prompt"], b["answer"])
-        return "; ".join(bad) if bad else None
-    return check
 
 
 # --- что делать в этом цикле ---------------------------------------------
@@ -428,15 +348,17 @@ class Loop:
                 self.say(f"  {job_id}: своя связка не прочитана ({e}), "
                          f"считаем заново")
 
-        raw, src, why = fetch_verified(
-            self.prompt_sources(), f"{int(job_id)}.txt", prompt_check(job))
+        raw, src, why = delivery.fetch_verified(
+            self.prompt_sources(),
+            (f"{job.get('prompt_hash')}.txt", f"{int(job_id)}.txt"),
+            delivery.prompt_check(job))
         if raw is None:
             self.say(f"  {job_id}: запрос не получен ни откуда — работать "
                      f"нечем")
             for w in why:
                 self.say(f"    {w}")
             return None
-        prompt = prompt_text(raw, job)
+        prompt = delivery.prompt_text(raw, job)
         self.say(f"  {job_id}: запрос получен из {src}, сошёлся с цепочкой")
 
         r = executor.run(self.base_url, self.model, int(job_id), prompt,
@@ -461,8 +383,8 @@ class Loop:
 
     def do_check(self, job_id, job, params, now, record=None):
         """Достать связку, оценить ту же пару и собрать `submit_check`."""
-        raw, src, why = fetch_verified(
-            self.bundle_sources(), f"{int(job_id)}.json", bundle_check(job))
+        raw, src, why = delivery.fetch_verified(
+            self.bundle_sources(), f"{int(job_id)}.json", delivery.bundle_check(job))
         if raw is None:
             self.say(f"  {job_id}: связка не получена ни откуда — проверять "
                      f"нечего")
@@ -504,6 +426,29 @@ class Loop:
 
         from_id = self.state["from_id"]
         jobs = scan_jobs(self.rest, self.contract, from_id, self.max_scan)
+        if from_id > 1 and not jobs:
+            # Отметка может указывать ЗА КРАЙ цепочки: файл состояния
+            # переехал с другой сети, был восстановлен из копии или
+            # скопирован с соседа. Тогда узел слеп ко всем заданиям ниже
+            # отметки и молчит об этом — ровно это и случилось на прогоне
+            # стенда, где рабочий каталог переиспользовали.
+            #
+            # Признак положительный: задание под `from_id - 1` обязано
+            # существовать И БЫТЬ ЗАКРЫТЫМ — отметку двигает только
+            # `next_watermark`, и только по закрытым. Один лишний
+            # запрос, и только когда работы нет.
+            #
+            # Проверять одно существование НЕ ГОДИТСЯ, и это стоило
+            # второго прогона: на новой цепочке под номером 1 оказалось
+            # свежее открытое задание, существование подтвердилось, и
+            # узел так и остался слепым.
+            prev = chain.job_or_none(self.rest, self.contract, from_id - 1)
+            if prev is None or state_of(prev) != "settled":
+                self.say(f"отметка {from_id} указывает за край цепочки — "
+                         f"смотрим с начала")
+                from_id = 1
+                self.state["from_id"] = 1
+                jobs = scan_jobs(self.rest, self.contract, 1, self.max_scan)
         checks = {}
         for job_id, job in jobs.items():
             if state_of(job) == "answered":
