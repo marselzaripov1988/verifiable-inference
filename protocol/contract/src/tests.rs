@@ -3046,3 +3046,60 @@ fn proveryayushchiy_bez_zaloga_rabotaet_i_posle_vozvrata() {
         }).unwrap();
     assert_eq!(stake_of(deps.as_ref(), "checkerx"), Uint128::zero());
 }
+
+#[test]
+fn testovyy_list_otlichaetsya_rovno_zalogom() {
+    // Тестовый экземпляр нужен затем, что трёх узлов на настоящих картах
+    // не проверял никто: залог 30 400 AXM — три такие суммы из своего
+    // кармана. С маленьким залогом проверяется всё остальное: сойдутся ли
+    // хэши у ТРЁХ разных карт одной модели, достанут ли узлы связки друг
+    // у друга через проброшенные порты, уложится ли настоящий инференс в
+    // срок.
+    //
+    // Но полезен он РОВНО до тех пор, пока отличается от боевого одним
+    // полем. Разойдись что-то ещё — предел пробы, кеш ядер, число
+    // проверок, — и прогон перестанет говорить о настоящем классе, а
+    // заметит это разве что узел, получивший отказ. Поэтому сверяются не
+    // отличия, а совпадения.
+    let boevoy: InstantiateMsg =
+        serde_json::from_str(include_str!("../deploy/instantiate.json"))
+            .expect("боевой лист не разобран");
+    let test: InstantiateMsg =
+        serde_json::from_str(include_str!("../deploy/instantiate-test.json"))
+            .expect("тестовый лист не разобран");
+
+    // Отличие — и только оно.
+    assert_eq!(boevoy.min_stake, Uint128::new(30_400_000_000));
+    assert_eq!(test.min_stake, Uint128::new(100_000),
+               "в тестовом листе залог 0,1 AXM");
+
+    // Всё остальное — побайтово как в боевом.
+    assert_eq!(test.admin, boevoy.admin);
+    assert_eq!(test.checks_required, boevoy.checks_required);
+    assert_eq!(test.pinned_model, boevoy.pinned_model);
+    assert_eq!(test.pinned_runtime, boevoy.pinned_runtime);
+    assert_eq!(test.pinned_dtype, boevoy.pinned_dtype);
+    assert_eq!(test.pinned_arch, boevoy.pinned_arch, "тот же класс карт");
+    assert_eq!(test.kernel_cache_hash, boevoy.kernel_cache_hash,
+               "тот же кеш ядер: иначе карты не те");
+    assert_eq!(test.conformance_limit_micro, boevoy.conformance_limit_micro,
+               "предел пробы нулевой и здесь: допуск не ослабляется");
+    assert_eq!(test.conformance_ref_hash, boevoy.conformance_ref_hash,
+               "тот же эталон пробы");
+    assert_eq!(test.conformance_lens, boevoy.conformance_lens);
+    assert_eq!(test.claim_ttl_seconds, boevoy.claim_ttl_seconds);
+    assert_eq!(test.check_ttl_seconds, boevoy.check_ttl_seconds);
+    assert_eq!(test.stake_denom, boevoy.stake_denom);
+    assert_eq!(test.verifier_fee_bps, boevoy.verifier_fee_bps);
+    assert_eq!(test.settlement, boevoy.settlement);
+    assert_eq!(test.forfeit, boevoy.forfeit);
+
+    // И тестовый лист обязан разворачиваться: лист с опечаткой стоил бы
+    // 0,45 AXM, выясняясь на живой цепочке.
+    let mut deps = mock_dependencies();
+    instantiate(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]), test).unwrap();
+    let cfg: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.min_stake, Uint128::new(100_000));
+    assert_eq!(cfg.conformance_version, 1);
+}
