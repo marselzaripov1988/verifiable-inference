@@ -2851,3 +2851,198 @@ fn perenos_formy_3_dobavlyaet_adresa() {
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
         ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
 }
+
+// --- залог: внести, донести, забрать ---------------------------------------
+//
+// Добавлено 28 октября, когда писалась инструкция владельцу карты. Писать
+// её про частичный возврат было нечего: `Pending` оказался дорогой в одну
+// сторону. Узел, забравший хоть единицу ниже минимума, становился
+// непригоден НАВСЕГДА — `Active` ставилось только при регистрации, а
+// зарегистрироваться второй раз нельзя. Деньги не пропадали, но адрес
+// приходилось бросать: новый залог, новая проба.
+//
+// Ниже по тесту на каждое свойство возврата, потому что инструкция
+// обещает их человеку, который тратит деньги.
+
+/// Статус узла, как его отдаёт запрос.
+fn status_of(deps: Deps, who: &str) -> ExecutorStatus {
+    let e: Executor = from_json(query(deps, mock_env(),
+        QueryMsg::Executor { address: who.into() }).unwrap()).unwrap();
+    e.status
+}
+
+fn stake_of(deps: Deps, who: &str) -> Uint128 {
+    let e: Executor = from_json(query(deps, mock_env(),
+        QueryMsg::Executor { address: who.into() }).unwrap()).unwrap();
+    e.stake
+}
+
+#[test]
+fn chastichnyy_vozvrat_obratim() {
+    // Главное свойство: забрал ниже минимума — не работает, донёс —
+    // снова работает. Без обратимости частичный возврат был бы ловушкой,
+    // и инструкции пришлось бы запрещать то, что контракт разрешает.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Active);
+
+    // Забираем ОДНУ единицу: этого хватает, чтобы выпасть из минимума.
+    let res = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::one() }).unwrap();
+    assert_eq!(res.messages.len(), 1, "деньги уходят одним сообщением");
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Pending);
+    assert_eq!(stake_of(deps.as_ref(), EXEC), Uint128::new(MIN_STAKE - 1));
+
+    // Задания не дают, и отказ говорит про статус, а не про подлог.
+    submit_job(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap_err();
+    assert!(matches!(err, ContractError::ExecutorNotActive { ref status }
+        if status == "Pending"), "вышло {err:?}");
+
+    // Донёс ровно недостающее — снова допущен, и это видно в событии.
+    let res = execute(deps.as_mut(), mock_env(),
+        mock_info(EXEC, &coins(1, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "status"
+        && a.value == "Active"), "событие не назвало статус");
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Active);
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 1 }).unwrap();
+}
+
+#[test]
+fn nedonesyonnyy_zalog_ne_vozvrashchaet_dopusk() {
+    // Донёс, но не до минимума — остаётся Pending. Иначе «донести»
+    // значило бы «положить сколько угодно».
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(1000) }).unwrap();
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Pending);
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &coins(999, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap();
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Pending,
+               "залога всё ещё не хватает");
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &coins(1, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap();
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Active);
+}
+
+#[test]
+fn vznos_zabanennogo_statusa_ne_vozvrashchaet() {
+    // Обратимость — только для Pending. Banned необратим, и взнос от
+    // него не принимается вовсе: иначе монеты заперло бы навсегда.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
+    execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert_eq!(status_of(deps.as_ref(), EXEC), ExecutorStatus::Banned);
+    assert_eq!(stake_of(deps.as_ref(), EXEC), Uint128::zero(),
+               "залог изъят целиком");
+
+    let err = execute(deps.as_mut(), mock_env(),
+        mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap_err();
+    assert!(matches!(err, ContractError::ExecutorBanned), "вышло {err:?}");
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::one() }).unwrap_err();
+    assert!(matches!(err, ContractError::ExecutorBanned), "вышло {err:?}");
+}
+
+#[test]
+fn vozvrat_celikom_otdayot_vsyo_i_tolko_svoyo() {
+    // Уходя, узел забирает ровно внесённое — ни больше, ни меньше, — и
+    // сумма уходит в единице залога, а не в единице расчёта.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let res = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(MIN_STAKE) }).unwrap();
+    assert_eq!(stake_of(deps.as_ref(), EXEC), Uint128::zero());
+    match &res.messages[0].msg {
+        cosmwasm_std::CosmosMsg::Bank(cosmwasm_std::BankMsg::Send {
+            to_address, amount }) => {
+            assert_eq!(to_address, EXEC, "деньги уходят самому узлу");
+            assert_eq!(amount.len(), 1);
+            assert_eq!(amount[0].denom, STAKE, "единица залога, не расчёта");
+            assert_eq!(amount[0].amount, Uint128::new(MIN_STAKE));
+        }
+        other => panic!("не перевод залога: {other:?}"),
+    }
+    // Больше внесённого не отдаётся.
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::one() }).unwrap_err();
+    assert!(matches!(err, ContractError::StakeInsufficient { .. }),
+            "вышло {err:?}");
+}
+
+#[test]
+fn zalog_otpuskaetsya_posle_verdikta_i_posle_sroka() {
+    // Незакрытое задание держит залог. Но держит НЕ НАВСЕГДА: вердикт
+    // его отпускает, и истёкший срок — тоже, а закрыть просроченное
+    // вправе кто угодно, в том числе сам узел.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::one() }).unwrap_err();
+    assert!(matches!(err, ContractError::StakeLocked { open: 1 }),
+            "вышло {err:?}");
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
+    execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(MIN_STAKE) }).unwrap();
+    assert_eq!(stake_of(deps.as_ref(), EXEC), Uint128::zero(),
+               "после вердикта залог свободен");
+
+    // Второй случай: задание взято и брошено. Срок вышел, задание
+    // освобождает САМ узел, и залог отпускает.
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap();
+    submit_job(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::ClaimJob { job_id: 2 }).unwrap();
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::one() }).unwrap_err();
+    assert!(matches!(err, ContractError::StakeLocked { open: 1 }),
+            "вышло {err:?}");
+    execute(deps.as_mut(), env_after(CLAIM_TTL + 1), mock_info(EXEC, &[]),
+        ExecuteMsg::ReleaseJob { job_id: 2 }).unwrap();
+    execute(deps.as_mut(), env_after(CLAIM_TTL + 1), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(MIN_STAKE) }).unwrap();
+    assert_eq!(stake_of(deps.as_ref(), EXEC), Uint128::zero(),
+               "брошенное задание залог не держит после срока");
+    // И это не наказание: бана нет, только счётчик.
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.abandoned, 1);
+    assert_ne!(e.status, ExecutorStatus::Banned);
+}
+
+#[test]
+fn proveryayushchiy_bez_zaloga_rabotaet_i_posle_vozvrata() {
+    // Залог нужен исполнителю, а не проверяющему: забрав его целиком,
+    // узел остаётся проверяющим. Иначе возврат залога вышибал бы из
+    // сети проверки, которых и так не хватает.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    // Проверяющий заводится без залога вовсе — и сдаёт проверку.
+    register_and_probe(deps.as_mut(), "checkerx");
+    execute(deps.as_mut(), mock_env(), mock_info("checkerx", &[]),
+        ExecuteMsg::SubmitCheck {
+            job_id: id,
+            divergence_micro: 0,
+            logprobs_hash: COMMIT.into(),
+        }).unwrap();
+    assert_eq!(stake_of(deps.as_ref(), "checkerx"), Uint128::zero());
+}

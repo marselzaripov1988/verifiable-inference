@@ -635,10 +635,27 @@ fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
         return Err(ContractError::ExecutorBanned);
     }
     e.stake += sent;
+    // Донёс до минимума — снова допущен. Без этого `Pending` был дорогой
+    // в одну сторону: забрав хоть одну единицу ниже минимума, узел
+    // оставался непригоден НАВСЕГДА — `Active` ставилось только при
+    // регистрации, а зарегистрироваться второй раз нельзя
+    // (`ExecutorExists`). Деньги при этом не пропадали, но адрес
+    // приходилось бросать и начинать с нового: новый залог, новая проба.
+    //
+    // Это восстановление, а не новый допуск, и ослаблением оно не
+    // является: `Pending` означает ровно «залога не хватает» и ничего
+    // не говорит о подлоге. Залог и свежесть пробы всё равно проверяются
+    // при КАЖДОМ взятии задания. `Banned` сюда не попадает — он
+    // необратим и отсечён выше.
+    if e.status == ExecutorStatus::Pending && e.stake >= cfg.min_stake {
+        e.status = ExecutorStatus::Active;
+    }
+    let status = format!("{:?}", e.status);
     EXECUTORS.save(deps.storage, &info.sender, &e)?;
     Ok(Response::new()
         .add_attribute("action", "deposit_stake")
-        .add_attribute("stake", e.stake.to_string()))
+        .add_attribute("stake", e.stake.to_string())
+        .add_attribute("status", status))
 }
 
 fn withdraw_stake(
