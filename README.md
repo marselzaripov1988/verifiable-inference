@@ -46,6 +46,7 @@ docker run --rm -v "$PWD/protocol/contract:/w" -w /w rust:slim cargo test
 sh protocol/devnet/run.sh                      # полный цикл на настоящем wasmd
 sh protocol/devnet/run-loop.sh                 # заказчик и три узла, без человека
 sh protocol/devnet/run-zalog.sh                # залог: внести, донести, забрать
+sh protocol/devnet/run-list-test.sh             # лист тестового экземпляра, три узла
 ```
 
 `test_verify.py` не выдумывает данные: он берёт сохранённые векторы
