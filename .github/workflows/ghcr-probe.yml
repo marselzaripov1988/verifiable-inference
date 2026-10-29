@@ -1,0 +1,69 @@
+# Одноразовая проба: почему GHCR отвечает denied на манифест.
+#
+# Большая сборка отвечает на этот вопрос за пять минут и десять гигабайт.
+# Здесь тот же вопрос стоит сорок секунд: образ из одной строки, тот же
+# токен, тот же способ входа. Если denied повторится — дело в правах на
+# пространство имён, а не в размере образа.
+#
+# Удалить после ответа.
+name: проба GHCR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  proba:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: что в токене
+        run: |
+          echo "actor:      ${{ github.actor }}"
+          echo "владелец:   ${{ github.repository_owner }}"
+          echo "репозиторий: ${{ github.repository }}"
+
+      - name: собрать образ из одной строки
+        run: |
+          echo 'FROM alpine:3.20' > Dockerfile.proba
+          echo 'RUN echo проба > /proba.txt' >> Dockerfile.proba
+          docker build -f Dockerfile.proba -t proba:1 .
+
+      - name: что отвечает реестр на выдачу прав
+        # GHCR сначала выдаёт токен на область repository:<имя>:push,pull.
+        # В его полезной нагрузке видно, ЧТО именно разрешено, — это
+        # отвечает на вопрос точнее, чем сообщение docker.
+        run: |
+          B=$(printf '%s' "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+          for name in "${{ github.repository }}/node" "${{ github.repository }}/proba" "${{ github.repository_owner }}/proba"; do
+            echo "--- область repository:$name:pull,push"
+            t=$(curl -s -H "Authorization: Basic $B" \
+                 "https://ghcr.io/token?service=ghcr.io&scope=repository:$name:pull,push")
+            printf '%s' "$t" | python3 -c '
+import json,sys,base64
+d=json.load(sys.stdin)
+tok=d.get("token","")
+if not tok:
+    print("   токена не выдали:", json.dumps(d)[:200]); raise SystemExit
+p=tok.split(".")[1]
+p+="="*(-len(p)%4)
+c=json.loads(base64.urlsafe_b64decode(p))
+print("   выдано:", json.dumps(c.get("access"), ensure_ascii=False)[:300])
+'
+          done
+
+      - name: попробовать запушить
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          for name in "ghcr.io/${{ github.repository }}/proba" "ghcr.io/${{ github.repository_owner }}/proba"; do
+            echo "--- push $name:1"
+            docker tag proba:1 "$name:1"
+            if docker push "$name:1" 2>&1 | tail -3; then
+              echo "   ПРОШЛО: $name"
+            else
+              echo "   отказ на $name"
+            fi
+          done
