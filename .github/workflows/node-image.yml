@@ -20,7 +20,11 @@ permissions:
   packages: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}/node
+  # Имя из ДВУХ сегментов, и это не стиль, а проверенное требование:
+  # проба 29 октября показала, что GHCR в пространстве имён пользователя
+  # отвергает владелец/репозиторий/имя на манифесте (слои уходят, а
+  # манифест получает denied), и принимает владелец/имя.
+  IMAGE: ghcr.io/${{ github.repository_owner }}/verifiable-inference-node
   # Официальный выпуск Axiome v2.2.1. Сумма сверяется внутри сборки;
   # без неё Dockerfile отказывается собираться.
   AXMD_SHA256: c8ef347f91b1378225f102c1124efcdc81fe6bb83ae2223fd8175df2041c0d4d
