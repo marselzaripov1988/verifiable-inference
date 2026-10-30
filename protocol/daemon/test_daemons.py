@@ -196,7 +196,7 @@ def test_chain_params():
         "pinned_model": "Qwen/Qwen2.5-7B-Instruct",
         "pinned_runtime": "vllm-0.31.0", "pinned_dtype": "bfloat16",
         "pinned_arch": "sm_89", "kernel_cache_hash": "3753554454f2c9b8",
-        "settlement": {"cw20": "axm1uz…"}, "stake_denom": "uaxm",
+        "settlement": {"cw20": "axm1uz…"}, "stake_unit": {"cw20": "axm1bartr…"},
         "min_stake": "150000000", "verifier_fee_bps": 970,
         "conformance_limit_micro": "0",
         "conformance_ref_hash": "0" * 64,
@@ -209,7 +209,17 @@ def test_chain_params():
     ok(p.checks_required == 2, "число проверок из цепочки")
     ok(p.pinned_arch == "sm_89", "архитектура класса из цепочки")
     ok(p.kernel_cache_hash == "3753554454f2c9b8", "хэш кеша ядер из цепочки")
-    ok(p.stake_denom == "uaxm", "денom залога из цепочки")
+    ok(chain.settlement_label(p.stake_unit) == "cw20:axm1bartr…",
+       "единица залога из цепочки, и она может быть CW20")
+    # Контракт до формы 5 держит залог строкой, и это родная монета.
+    # Читается она же, а не отказом: иначе новый демон не работал бы с
+    # ещё не перенесённым контрактом.
+    stary = {k: v for k, v in cfg.items() if k != "stake_unit"}
+    stary["stake_denom"] = "uaxm"
+    chain.query_smart = lambda rest, c, q, timeout=20: stary
+    ok(chain.load_params("http://rest", "axm1c").stake_unit == {"native": "uaxm"},
+       "залог строкой из формы 4 прочитан как родная монета")
+    chain.query_smart = lambda rest, c, q, timeout=20: cfg
     ok((p.claim_ttl_seconds, p.check_ttl_seconds) == (600, 3600),
        "сроки заданий из цепочки")
     # Без срока в настройках демон не работает: это не мелочь, которую
@@ -601,7 +611,7 @@ def test_sroki_v_demonah():
     P = chain.Params(
         checks_required=2, pinned_model="m", pinned_runtime="r",
         pinned_dtype="bfloat16", pinned_arch="sm_89", kernel_cache_hash="k",
-        settlement={"native": "uaxm"}, stake_denom="uaxm",
+        settlement={"native": "uaxm"}, stake_unit={"native": "uaxm"},
         min_stake=150_000_000, verifier_fee_bps=970,
         conformance_limit_micro=0, conformance_ref_hash="x" * 64,
         conformance_lens=(3,), conformance_version=1,

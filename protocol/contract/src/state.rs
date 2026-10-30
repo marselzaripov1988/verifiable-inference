@@ -141,9 +141,19 @@ pub struct Config {
     /// единицу. Менять это должно быть правкой настройки, а не выпуском
     /// нового контракта.
     pub settlement: Settlement,
-    /// Единица залога. Родная монета цепочки: её сжигание — настоящая
-    /// стока, в отличие от сжигания CW20.
-    pub stake_denom: String,
+    /// Единица залога. Тем же видом, что расчёт: родная монета или CW20.
+    ///
+    /// До формы 5 здесь была строка `stake_denom`, то есть только родная
+    /// монета, и `deposit_stake` брал монеты из транзакции. Залог в BARTR
+    /// так не внести: BARTR — CW20, его монеты приходят только через
+    /// `Receive`. Поэтому единица стала тем же перечислением, что
+    /// `settlement`, а внесение получило второй путь —
+    /// `ReceiveHook::DepositStake`.
+    ///
+    /// Сменить единицу можно, только пока залога на контракте нет ни у
+    /// кого: запись `Executor.stake` — число без единицы, и после смены
+    /// внесённые uaxm вернулись бы токенами BARTR.
+    pub stake_unit: Settlement,
 
     // --- деньги (шаг 14) ------------------------------------------------
     /// Минимальный залог. Замер: кратно суточной выручке карты, один-семь
@@ -282,7 +292,7 @@ pub struct Executor {
     /// молчащий, ничем не отличается от исправного.
     #[serde(default)]
     pub abandoned: u64,
-    /// Внесённый залог в stake_denom. Активным исполнитель становится
+    /// Внесённый залог в stake_unit. Активным исполнитель становится
     /// только при залоге не ниже min_stake.
     pub stake: Uint128,
     /// Пройденная проба на эталонном векторе. None — заданий не получает,
@@ -433,15 +443,17 @@ pub const CHECKS: Map<(u64, &Addr), Check> = Map::new("checks");
 pub const STATE_VERSION: Item<u16> = Item::new("state_version");
 
 /// Нынешняя форма. 1 — с `attestor`, 2 — без него, 3 — со сроками,
-/// 4 — с адресами доставки (`Executor.endpoint`, `Job.prompt_uri`).
+/// 4 — с адресами доставки (`Executor.endpoint`, `Job.prompt_uri`),
+/// 5 — единица залога перечислением (`stake_unit`) вместо строки.
 ///
 /// Форма 4 от формы 3 отличается только ДОБАВЛЕННЫМИ полями у записей
-/// узлов и заданий, а настройки те же. Поэтому ни `ConfigV3`, ни
-/// переписывания записей переносчику не нужно: оба новых поля читаются
-/// через `serde(default)`, и старая запись становится записью без адреса.
-/// Узел без адреса задания не получит, но это не поломка переноса — ему
-/// достаточно отправить `SetEndpoint`.
-pub const CURRENT_VERSION: u16 = 4;
+/// узлов и заданий, а настройки те же: оба новых поля читаются через
+/// `serde(default)`, и старая запись становится записью без адреса.
+///
+/// Форма 5 меняет только настройки: `stake_denom: "uaxm"` становится
+/// `stake_unit: {"native": "uaxm"}`. Записи узлов не трогаются — сумма
+/// залога в них та же, и единица у неё та же, пока её не сменят.
+pub const CURRENT_VERSION: u16 = 5;
 
 /// Настройки формы 1: с `attestor`. Нужна только переносчику.
 ///
@@ -496,11 +508,62 @@ pub struct ConfigV2 {
     pub forfeit: Forfeit,
 }
 
+/// Настройки форм 3 и 4: со сроками, залог строкой `stake_denom`. Это
+/// то, что лежит у четырёх развёрнутых экземпляров с 28 октября.
+#[derive(serde::Deserialize)]
+pub struct ConfigV3 {
+    pub admin: Addr,
+    pub checks_required: u32,
+    pub pinned_model: String,
+    pub pinned_runtime: String,
+    pub pinned_dtype: String,
+    pub pinned_arch: String,
+    pub kernel_cache_hash: String,
+    pub conformance_limit_micro: Micro,
+    pub conformance_ref_hash: String,
+    pub conformance_lens: Vec<u32>,
+    pub conformance_version: u64,
+    pub claim_ttl_seconds: u64,
+    pub check_ttl_seconds: u64,
+    pub settlement: Settlement,
+    pub stake_denom: String,
+    pub min_stake: Uint128,
+    pub verifier_fee_bps: u16,
+    pub forfeit: Forfeit,
+}
+
+impl ConfigV3 {
+    /// Форма 3/4 -> 5: строка залога становится родной монетой той же
+    /// строкой. Единица не меняется — меняется только запись.
+    pub fn to_v5(self) -> Config {
+        Config {
+            admin: self.admin,
+            checks_required: self.checks_required,
+            pinned_model: self.pinned_model,
+            pinned_runtime: self.pinned_runtime,
+            pinned_dtype: self.pinned_dtype,
+            pinned_arch: self.pinned_arch,
+            kernel_cache_hash: self.kernel_cache_hash,
+            conformance_limit_micro: self.conformance_limit_micro,
+            conformance_ref_hash: self.conformance_ref_hash,
+            conformance_lens: self.conformance_lens,
+            conformance_version: self.conformance_version,
+            claim_ttl_seconds: self.claim_ttl_seconds,
+            check_ttl_seconds: self.check_ttl_seconds,
+            settlement: self.settlement,
+            stake_unit: Settlement::Native(self.stake_denom),
+            min_stake: self.min_stake,
+            verifier_fee_bps: self.verifier_fee_bps,
+            forfeit: self.forfeit,
+        }
+    }
+}
+
 impl ConfigV2 {
     /// Форма 2 -> 3: добавляются сроки. Значения приходят снаружи, из
     /// переносчика, и не берутся из воздуха здесь.
-    pub fn to_v3(self, claim_ttl_seconds: u64, check_ttl_seconds: u64) -> Config {
-        Config {
+    pub fn to_v3(self, claim_ttl_seconds: u64, check_ttl_seconds: u64) -> ConfigV3 {
+        ConfigV3 {
             admin: self.admin,
             checks_required: self.checks_required,
             pinned_model: self.pinned_model,

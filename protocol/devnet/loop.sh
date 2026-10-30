@@ -178,7 +178,7 @@ send wasm instantiate "$CODE" "{\"admin\":\"$ADMIN\",\"checks_required\":2,\
 \"kernel_cache_hash\":\"devnet-cache\",\"conformance_limit_micro\":0,\
 \"conformance_ref_hash\":\"$ZEROS\",\"conformance_lens\":[3,3],\
 \"claim_ttl_seconds\":600,\"check_ttl_seconds\":3600,\
-\"settlement\":{\"native\":\"stake\"},\"stake_denom\":\"stake\",\
+\"settlement\":{\"native\":\"stake\"},\"stake_unit\":{\"native\":\"stake\"},\
 \"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":$BPS,\
 \"forfeit\":{\"to_address\":\"$ADMIN\"}}" --label registry --no-admin --from admin
 REG=$($B query wasm list-contract-by-code "$CODE" $Q | jq -r '.contracts[0]')

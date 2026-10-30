@@ -51,7 +51,7 @@ CFG = {
     "pinned_model": "Qwen/Qwen2.5-7B-Instruct",
     "pinned_runtime": "vllm-0.31.0", "pinned_dtype": "bfloat16",
     "pinned_arch": "sm_89", "kernel_cache_hash": "k",
-    "settlement": {"native": "uaxm"}, "stake_denom": "uaxm",
+    "settlement": {"native": "uaxm"}, "stake_unit": {"native": "uaxm"},
     "min_stake": "30400000000", "verifier_fee_bps": 485,
     "conformance_limit_micro": "0", "conformance_ref_hash": "0" * 64,
     "conformance_lens": [3, 3], "conformance_version": 1,

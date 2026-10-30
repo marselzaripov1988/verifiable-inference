@@ -49,7 +49,9 @@
  "settlement": {
   "native": "uaxm"
  },
- "stake_denom": "uaxm",
+ "stake_unit": {
+  "native": "uaxm"
+ },
  "min_stake": "30400000000",
  "verifier_fee_bps": 485,
  "forfeit": {

@@ -57,7 +57,10 @@ class Params:
     #: Вариантом, а не строкой: контракт умеет оба, и демону надо знать
     #: не только имя единицы, но и КАК она платится.
     settlement: dict
-    stake_denom: str
+    #: Чем вносится залог — тем же видом, что расчёт: {"native": "uaxm"}
+    #: либо {"cw20": "axm1…"} (BARTR). От вида зависит КАК вносить: родная
+    #: монета идёт с `deposit_stake`, CW20 — `send` на контракт токена.
+    stake_unit: dict
     #: Минимальный залог. Нужен петле ДО отправки: контракт проверяет залог
     #: при каждом взятии задания, и узел с недобором платил бы газ за
     #: отказ каждый цикл вместо того, чтобы сказать оператору, чего не
@@ -124,10 +127,16 @@ def load_params(rest, contract):
     протоколе вместо того, которое записано в цепочке.
     """
     d = query_smart(rest, contract, {"config": {}})
+    # Формы 3 и 4 (code_id до 343 включительно) держат залог строкой
+    # `stake_denom`, и это всегда родная монета. Читается как она же, а не
+    # отказом: иначе новый демон не работал бы с контрактом, который ещё
+    # не перенесли, хотя смысл записи однозначен.
+    if "stake_unit" not in d and "stake_denom" in d:
+        d = dict(d, stake_unit={"native": d["stake_denom"]})
     need = ("checks_required",
             "pinned_model", "pinned_runtime", "pinned_dtype",
             "pinned_arch", "kernel_cache_hash",
-            "settlement", "stake_denom", "min_stake", "verifier_fee_bps",
+            "settlement", "stake_unit", "min_stake", "verifier_fee_bps",
             "conformance_limit_micro", "conformance_ref_hash",
             "conformance_lens", "conformance_version",
             "claim_ttl_seconds", "check_ttl_seconds")
@@ -142,7 +151,7 @@ def load_params(rest, contract):
         pinned_arch=d["pinned_arch"],
         kernel_cache_hash=d["kernel_cache_hash"],
         settlement=d["settlement"],
-        stake_denom=d["stake_denom"],
+        stake_unit=d["stake_unit"],
         min_stake=int(d["min_stake"]),
         verifier_fee_bps=int(d["verifier_fee_bps"]),
         conformance_limit_micro=int(d["conformance_limit_micro"]),

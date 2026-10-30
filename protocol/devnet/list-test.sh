@@ -72,7 +72,7 @@ bal() {
 # Поля берутся ИЗ ЛИСТА: сценарий не знает их и знать не должен.
 f() { jq -r "$1" "$LIST"; }
 
-DENOM=$(f '.stake_denom')
+DENOM=$(f '.stake_unit.native')
 MIN_STAKE=$(f '.min_stake')
 MODEL=$(f '.pinned_model')
 RUNTIME=$(f '.pinned_runtime')

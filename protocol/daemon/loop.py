@@ -310,7 +310,8 @@ def allowed_roles(params, record, roles):
     if have < int(params.min_stake):
         return (tuple(r for r in roles if r != "executor"),
                 [f"залог {have} меньше нужного {params.min_stake} "
-                 f"{params.stake_denom}: заданий не взять, проверять можно"])
+                 f"{chain.settlement_label(params.stake_unit)}: "
+                 f"заданий не взять, проверять можно"])
     # Адрес доставки проверяется ТАК ЖЕ, как залог, и по той же причине:
     # контракт его требует при взятии, а причина отвергнутой сделки
     # оператору не видна — видна только списанная плата за газ.
