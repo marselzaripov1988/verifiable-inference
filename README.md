@@ -1,5 +1,46 @@
 # Проверяемый инференс: протокол, шлюз, замеры
 
+## Запуск узла
+
+Образ один, команды различает только `CONTRACT`. Образ берётся по
+digest, а не по тегу `v1`: тег можно переписать, digest — нет.
+
+**Тестовый** (RTX 4090, залог 0,1 AXM):
+
+```sh
+docker run -d --gpus all --name node-test -p 8081:8081 \
+  -e CONTRACT=axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm \
+  -e ENDPOINT=http://ВАШ-АДРЕС:ПОРТ \
+  -e KEY_HEX=<64 знака рабочего ключа> \
+  ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:672a88a7129065b5c495398c18843cd6e28dacc62ecf1ca14fc59197a1826df9
+```
+
+**Боевой** (RTX 4090, залог 30 400 AXM):
+
+```sh
+docker run -d --gpus all --name node -p 8081:8081 \
+  -e CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r \
+  -e ENDPOINT=http://ВАШ-АДРЕС:ПОРТ \
+  -e KEY_HEX=<64 знака рабочего ключа> \
+  ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:672a88a7129065b5c495398c18843cd6e28dacc62ecf1ca14fc59197a1826df9
+```
+
+Боевые реестры других классов подставляются в `CONTRACT` так же:
+`sm_86` (3090) — `axm1svd4ghyg8ku3s9al9atjxlsgclz8jgrnpa6g0day734ldzum3k6qyf8h36`,
+`sm_120` (5090) — `axm1k2v4cjqfl5mqjutnyg5g4cgtatvj835p2sen8myefy40h4pv3ttscnqtwg`.
+Тестовый экземпляр есть только для 4090.
+
+- `ENDPOINT` — адрес, по которому порт 8081 видно **снаружи**; на
+  арендованных машинах внешний порт обычно другой.
+- `KEY_HEX` — ключ **рабочего** адреса, не того, где залог
+  ([protocol/УЗЕЛ.md](protocol/УЗЕЛ.md), раздел 9).
+- Регистрацию и залог образ **не делает**: до запуска они вносятся с
+  холодного адреса в тот же контракт (разделы 5 и 8 УЗЕЛ.md). В тестовом
+  в шаге 5.2 сумма `100000uaxm` вместо `30400000000uaxm`.
+- Признак, что узел поднялся: `docker logs -f node-test` (или `node`) —
+  восемь шагов с `ок:`, проба с расхождением 0, ноль строк
+  `Compiling a graph`.
+
 Протокол, в котором посторонний владелец видеокарты выполняет запросы к
 языковой модели за плату, а сеть может **поймать его на подлоге** —
 подмене модели, квантования или рантайма — не повторяя работу целиком.
