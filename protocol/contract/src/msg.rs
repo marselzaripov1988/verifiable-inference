@@ -18,7 +18,7 @@ pub struct InstantiateMsg {
     pub claim_ttl_seconds: u64,
     pub check_ttl_seconds: u64,
     pub settlement: Settlement,
-    pub stake_denom: String,
+    pub stake_unit: Settlement,
     pub min_stake: Uint128,
     pub verifier_fee_bps: u16,
     pub forfeit: Forfeit,
@@ -55,7 +55,10 @@ pub enum ExecuteMsg {
         claim_ttl_seconds: Option<u64>,
         check_ttl_seconds: Option<u64>,
         settlement: Option<Settlement>,
-        stake_denom: Option<String>,
+        /// Единица залога. Сменить можно, только пока залога на
+        /// контракте нет ни у кого: сумма в записи узла — число без
+        /// единицы, и после смены внесённое вернулось бы другим токеном.
+        stake_unit: Option<Settlement>,
         min_stake: Option<Uint128>,
         verifier_fee_bps: Option<u16>,
         forfeit: Option<Forfeit>,
@@ -88,7 +91,9 @@ pub enum ExecuteMsg {
     /// берёт. Это законный режим — у кого связку забрать негде, тому и
     /// задание давать незачем.
     SetEndpoint { endpoint: Option<String> },
-    /// Исполнитель вносит залог в stake_denom. Монеты идут с транзакцией.
+    /// Исполнитель вносит залог родной монетой: монеты идут с
+    /// транзакцией. Работает только при `stake_unit` Native; залог в CW20
+    /// вносится `Send` на контракт с `ReceiveHook::DepositStake`.
     DepositStake {},
     /// Забрать залог. Нельзя забаненному и нельзя при незакрытых
     /// заданиях: иначе залог уходит ровно перед вердиктом.
@@ -207,6 +212,9 @@ pub enum ReceiveHook {
         prompt_uri: String,
         price: Uint128,
     },
+    /// Залог в CW20. Записывается на того, кто сделал `Send` (`sender`
+    /// во вложенном `Cw20ReceiveMsg`), а не на контракт токена.
+    DepositStake {},
 }
 
 /// Исходящее в контракт CW20. Объявлено здесь по той же причине, что и

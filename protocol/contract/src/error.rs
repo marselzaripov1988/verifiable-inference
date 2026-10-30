@@ -152,4 +152,16 @@ pub enum ContractError {
 
     #[error("с транзакцией пришло {got}, расчёт идёт в {want}")]
     WrongSettlementFunds { want: String, got: String },
+
+    #[error("залог вносится в CW20 {want}: Send на контракт с deposit_stake")]
+    NotNativeStake { want: String },
+
+    #[error("залог вносится родной монетой: с транзакцией, а не через CW20")]
+    NotCw20Stake,
+
+    #[error("единицу залога нельзя сменить, пока на контракте лежит залог: {staked}")]
+    StakeUnitLocked { staked: String },
+
+    #[error("сжечь залог в CW20 нельзя: сжигание BARTR — заявка на выкуп, а не стока; конфискат — только по адресу")]
+    BurnCw20Stake,
 }

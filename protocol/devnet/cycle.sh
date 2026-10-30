@@ -134,7 +134,7 @@ CONF_LIAR_HASH=a65355a94a1f443529e6db09861a235ee896070ad3d311aaee036fd668cfb37f
 REF_VEC=[-500000,-500000,-500000,-400000,-400000,-400000]
 HONEST_VEC=[-512700,-512700,-512700,-412700,-412700,-412700]
 LIAR_VEC=[-500000,-500000,-500000,-448000,-448000,-448000]
-send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement\":{\"cw20\":\"$CW20\"},\"stake_denom\":\"stake\",\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry --no-admin --from admin >/dev/null
+send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement\":{\"cw20\":\"$CW20\"},\"stake_unit\":{\"native\":\"stake\"},\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry --no-admin --from admin >/dev/null
 REG=$($B query wasm list-contract-by-code "$REG_CODE" $Q | jq -r '.contracts[0]')
 thr=$($B query wasm contract-state smart "$REG" '{"config":{}}' $Q | jq -r '.data.threshold_micro')
 [ "$thr" = "36000" ] || fail "порог в цепочке $thr, ожидался 36000"
@@ -270,7 +270,7 @@ say "13. РОДНОЙ РАСЧЁТ: второй реестр, оплата мо
 # Шлюз этапа 1 собирает родной AXM, и расчёт обязан идти той же монетой,
 # иначе этапы считают в разном. Здесь это доказывается на цепочке, а не
 # только в тестах.
-send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement\":{\"native\":\"stake\"},\"stake_denom\":\"stake\",\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry-native --no-admin --from admin >/dev/null
+send wasm instantiate "$REG_CODE" "{\"admin\":\"$ADMIN\",\"attestor\":\"$ATT\",\"threshold_micro\":36000,\"checks_required\":4,\"min_answer_tokens\":32,\"pinned_model\":\"Qwen/Qwen2.5-7B-Instruct\",\"pinned_runtime\":\"vllm-0.31.0\",\"pinned_dtype\":\"bfloat16\",\"settlement\":{\"native\":\"stake\"},\"stake_unit\":{\"native\":\"stake\"},\"min_stake\":\"$MIN_STAKE\",\"verifier_fee_bps\":970,\"forfeit\":\"burn\",\"conformance_limit_micro\":$CONF_LIMIT,\"conformance_ref_hash\":\"$CONF_REF_HASH\",\"conformance_lens\":[3,3]}" --label registry-native --no-admin --from admin >/dev/null
 NREG=$($B query wasm list-contract-by-code "$REG_CODE" $Q | jq -r '.contracts[-1]')
 [ "$NREG" != "$REG" ] || fail "второй реестр не развернулся"
 sm=$($B query wasm contract-state smart "$NREG" '{"config":{}}' $Q | jq -r '.data.settlement.native')

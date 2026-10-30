@@ -121,7 +121,7 @@ fn setup(deps: DepsMut) {
             claim_ttl_seconds: CLAIM_TTL,
             check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Cw20(Addr::unchecked(CW20)),
-            stake_denom: STAKE.into(),
+            stake_unit: Settlement::Native(STAKE.into()),
             min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS,
             forfeit: Forfeit::Burn,
@@ -735,7 +735,7 @@ fn prava_razdeleny() {
             claim_ttl_seconds: None,
             check_ttl_seconds: None,
             settlement: None,
-            stake_denom: None,
+            stake_unit: None,
             min_stake: None,
             verifier_fee_bps: None,
             forfeit: None,
@@ -792,7 +792,7 @@ fn nol_proverok_zapreshchen() {
             claim_ttl_seconds: CLAIM_TTL,
             check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Cw20(Addr::unchecked(CW20)),
-            stake_denom: STAKE.into(),
+            stake_unit: Settlement::Native(STAKE.into()),
             min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS,
             forfeit: Forfeit::Burn,
@@ -1097,7 +1097,7 @@ fn konfiskat_uhodit_po_adresu_a_ne_obvinyavshim() {
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None,
+            settlement: None, stake_unit: None,
             min_stake: None, verifier_fee_bps: None,
             forfeit: Some(Forfeit::ToAddress(Addr::unchecked("community_pool"))),
         }).unwrap();
@@ -1138,7 +1138,7 @@ fn dolya_svyshe_sta_procentov_zapreshchena() {
             pinned_model: None, pinned_runtime: None,
             pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None,
+            settlement: None, stake_unit: None,
             min_stake: None, verifier_fee_bps: Some(10_001), forfeit: None,
         }).unwrap_err();
     assert!(matches!(err, ContractError::BadFeeBps { bps: 10_001 }));
@@ -1282,7 +1282,7 @@ fn smena_svyazki_obnulyaet_probu() {
             pinned_runtime: Some("vllm-0.32.0".into()), pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_unit: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1307,7 +1307,7 @@ fn smena_etalona_obnulyaet_probu() {
                 lens: PROBE_LENS.to_vec(),
             }),
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_unit: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1334,7 +1334,7 @@ fn zapis_toy_zhe_svyazki_probu_ne_obnulyaet() {
                 lens: PROBE_LENS.to_vec(),
             }),
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_unit: None, min_stake: None,
             verifier_fee_bps: Some(500), forfeit: None,
         }).unwrap();
     execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
@@ -1502,7 +1502,7 @@ fn pustoy_etalon_ne_prinimaetsya() {
             conformance_lens: vec![],
             claim_ttl_seconds: CLAIM_TTL, check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Cw20(Addr::unchecked(CW20)),
-            stake_denom: STAKE.into(), min_stake: Uint128::new(MIN_STAKE),
+            stake_unit: Settlement::Native(STAKE.into()), min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS, forfeit: Forfeit::Burn,
         }).unwrap_err();
     assert!(matches!(err, ContractError::EmptyProbe));
@@ -1561,7 +1561,7 @@ fn proveryayushchiy_so_staroy_proboy_ne_prinimaetsya() {
                 lens: PROBE_LENS.to_vec(),
             }),
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_unit: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     let err = execute(deps.as_mut(), mock_env(), mock_info("checker0", &[]),
@@ -1602,7 +1602,7 @@ fn setup_native(deps: DepsMut) {
             claim_ttl_seconds: CLAIM_TTL,
             check_ttl_seconds: CHECK_TTL,
             settlement: Settlement::Native(NATIVE.into()),
-            stake_denom: STAKE.into(),
+            stake_unit: Settlement::Native(STAKE.into()),
             min_stake: Uint128::new(MIN_STAKE),
             verifier_fee_bps: FEE_BPS,
             forfeit: Forfeit::Burn,
@@ -1784,7 +1784,7 @@ fn vid_raschyota_menyaetsya_nastroykoy() {
             claim_ttl_seconds: None,
             check_ttl_seconds: None,
             settlement: Some(Settlement::Native(NATIVE.into())),
-            stake_denom: None, min_stake: None,
+            stake_unit: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     // Теперь принимается родной платёж, а CW20 — нет.
@@ -1998,7 +1998,7 @@ fn povyshenie_doli_ne_urezaet_vyruchku_ispolnitelya() {
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None,
+            settlement: None, stake_unit: None,
             min_stake: None, verifier_fee_bps: Some(5_000), forfeit: None,
         }).unwrap();
     submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
@@ -2083,7 +2083,7 @@ fn administratora_mozhno_smenit() {
             pinned_dtype: None, conformance_limit_micro: None,
             conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None,
+            settlement: None, stake_unit: None,
             min_stake: None, verifier_fee_bps: None, forfeit: None,
         }).unwrap();
     // Прежний администратор больше ничего не правит.
@@ -2094,7 +2094,7 @@ fn administratora_mozhno_smenit() {
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_unit: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap_err();
     assert!(matches!(err, ContractError::NotAdmin));
@@ -2106,7 +2106,7 @@ fn administratora_mozhno_smenit() {
             pinned_model: None, pinned_runtime: None, pinned_dtype: None,
             conformance_limit_micro: None, conformance_ref: None,
             claim_ttl_seconds: None, check_ttl_seconds: None,
-            settlement: None, stake_denom: None, min_stake: None,
+            settlement: None, stake_unit: None, min_stake: None,
             verifier_fee_bps: None, forfeit: None,
         }).unwrap();
 }
@@ -2158,7 +2158,7 @@ fn perenos_sbrasyvaet_attestora_i_hranit_ostalnoe() {
         .attributes
         .iter()
         .any(|a| a.key == "changed"
-            && a.value == "attestor_dropped,ttl_added,endpoint,prompt_uri,jobs_query"));
+            && a.value == "attestor_dropped,ttl_added,endpoint,prompt_uri,jobs_query,stake_unit"));
     assert_eq!(
         STATE_VERSION.load(deps.as_ref().storage).unwrap(),
         CURRENT_VERSION
@@ -2297,7 +2297,7 @@ fn perenos_formy_2_dobavlyaet_sroki() {
         .attributes
         .iter()
         .any(|a| a.key == "changed"
-            && a.value == "ttl_added,endpoint,prompt_uri,jobs_query"));
+            && a.value == "ttl_added,endpoint,prompt_uri,jobs_query,stake_unit"));
     let cfg: Config = from_json(
         query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
     assert_eq!(cfg.claim_ttl_seconds, 600);
@@ -2466,7 +2466,7 @@ fn nulevoy_srok_ne_prinimaetsya() {
                 pinned_model: None, pinned_runtime: None, pinned_dtype: None,
                 conformance_limit_micro: None, conformance_ref: None,
                 claim_ttl_seconds: c, check_ttl_seconds: k,
-                settlement: None, stake_denom: None, min_stake: None,
+                settlement: None, stake_unit: None, min_stake: None,
                 verifier_fee_bps: None, forfeit: None,
             }).unwrap_err();
         assert!(matches!(err, ContractError::ZeroTtl), "вышло {err:?}");
@@ -2817,16 +2817,18 @@ fn perenos_formy_3_dobavlyaet_adresa() {
     deps.as_mut().storage.set(
         &raw_map_key(b"jobs", &1u64.to_be_bytes()),
         serde_json::to_vec(&old_job).unwrap().as_slice());
+    put_v3_config(deps.as_mut());
     STATE_VERSION_FOR_TEST.save(deps.as_mut().storage, &3u16).unwrap();
 
     let res = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
     assert!(res.attributes.iter().any(|a| a.key == "from" && a.value == "3"));
     assert!(res.attributes.iter().any(|a| a.key == "changed"
-        && a.value == "endpoint,prompt_uri,jobs_query"));
+        && a.value == "endpoint,prompt_uri,jobs_query,stake_unit"));
     assert_eq!(STATE_VERSION_FOR_TEST.load(deps.as_ref().storage).unwrap(),
                CURRENT_VERSION);
 
-    // Настройки не тронуты: в форме 4 они те же.
+    // Настройки по существу не тронуты: залог строкой стал залогом
+    // родной монетой той же строки, остальное как было.
     let after: Config = from_json(
         query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
     assert_eq!(before, after, "перенос настроек не менял");
@@ -3089,7 +3091,7 @@ fn testovyy_list_otlichaetsya_rovno_zalogom() {
     assert_eq!(test.conformance_lens, boevoy.conformance_lens);
     assert_eq!(test.claim_ttl_seconds, boevoy.claim_ttl_seconds);
     assert_eq!(test.check_ttl_seconds, boevoy.check_ttl_seconds);
-    assert_eq!(test.stake_denom, boevoy.stake_denom);
+    assert_eq!(test.stake_unit, boevoy.stake_unit);
     assert_eq!(test.verifier_fee_bps, boevoy.verifier_fee_bps);
     assert_eq!(test.settlement, boevoy.settlement);
     assert_eq!(test.forfeit, boevoy.forfeit);
@@ -3102,4 +3104,280 @@ fn testovyy_list_otlichaetsya_rovno_zalogom() {
         query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
     assert_eq!(cfg.min_stake, Uint128::new(100_000));
     assert_eq!(cfg.conformance_version, 1);
+}
+
+// --- залог в CW20 (форма 5) ---------------------------------------------
+//
+// Добавлено 30 октября: залог в BARTR. BARTR — CW20, и родной монетой с
+// транзакцией его не внести; он приходит только `Send` на контракт с
+// вложенным `deposit_stake`. Поэтому единица залога стала тем же
+// перечислением, что расчёт, а переход формы 4 -> 5 переписывает строку
+// `stake_denom` в `stake_unit` родной монетой — и ничего больше.
+
+const BARTR: &str = "bartrtoken";
+const FORFEIT_TO: &str = "forfeit_address";
+
+/// Переписать нынешние настройки в форму 3/4: `stake_unit` родной монетой
+/// становится строкой `stake_denom`. Так они лежат у четырёх развёрнутых
+/// экземпляров — переносчик обязан читать именно это, а не то, что сам
+/// записал.
+fn put_v3_config(deps: DepsMut) {
+    let raw = deps.storage.get(b"config").expect("настроек нет");
+    let mut v: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+    let o = v.as_object_mut().unwrap();
+    let unit = o.remove("stake_unit").expect("в нынешних настройках нет stake_unit");
+    let denom = unit["native"].as_str().expect("форма 3 знала только родную монету");
+    o.insert("stake_denom".into(), serde_json::Value::String(denom.into()));
+    deps.storage.set(b"config", serde_json::to_vec(&v).unwrap().as_slice());
+}
+
+/// Экземпляр с залогом в BARTR: расчёт по-прежнему CW20 из `setup`, а
+/// залог — другой CW20. Конфискат по адресу: сжигать BARTR нельзя.
+fn setup_bartr(deps: DepsMut) {
+    instantiate(deps, mock_env(), mock_info(ADMIN, &[]), InstantiateMsg {
+        admin: ADMIN.into(),
+        checks_required: CHECKS,
+        pinned_model: MODEL.into(),
+        pinned_runtime: RUNTIME.into(),
+        pinned_dtype: DTYPE.into(),
+        pinned_arch: ARCH.into(),
+        kernel_cache_hash: CACHE.into(),
+        conformance_limit_micro: CONF_LIMIT,
+        conformance_ref_hash: commit_hash(&probe_ref()),
+        conformance_lens: PROBE_LENS.to_vec(),
+        claim_ttl_seconds: CLAIM_TTL,
+        check_ttl_seconds: CHECK_TTL,
+        settlement: Settlement::Cw20(Addr::unchecked(CW20)),
+        stake_unit: Settlement::Cw20(Addr::unchecked(BARTR)),
+        min_stake: Uint128::new(MIN_STAKE),
+        verifier_fee_bps: FEE_BPS,
+        forfeit: Forfeit::ToAddress(Addr::unchecked(FORFEIT_TO)),
+    }).unwrap();
+}
+
+/// Залог в CW20: вызов приходит ОТ контракта токена, а залог пишется на
+/// того, кто сделал Send.
+fn stake_cw20(deps: DepsMut, token: &str, who: &str, amount: u128)
+    -> Result<cosmwasm_std::Response, ContractError> {
+    execute(deps, mock_env(), mock_info(token, &[]),
+        ExecuteMsg::Receive(Cw20ReceiveMsg {
+            sender: who.into(),
+            amount: Uint128::new(amount),
+            msg: to_json_binary(&ReceiveHook::DepositStake {}).unwrap(),
+        }))
+}
+
+fn register_and_stake_bartr(deps: DepsMut, who: &str) {
+    let mut d = deps;
+    execute(d.branch(), mock_env(), mock_info(who, &[]),
+        ExecuteMsg::RegisterExecutor {
+            model: MODEL.into(), runtime: RUNTIME.into(), dtype: DTYPE.into(),
+            card_class: ARCH.into(), kernel_cache_hash: CACHE.into(),
+        }).unwrap();
+    stake_cw20(d.branch(), BARTR, who, MIN_STAKE).unwrap();
+    announce(d.branch(), who, ENDPOINT);
+    pass_probe(d.branch(), who, 0);
+}
+
+fn only_stake_unit(unit: Settlement) -> ExecuteMsg {
+    ExecuteMsg::UpdateConfig {
+        admin: None, checks_required: None,
+        pinned_arch: None, kernel_cache_hash: None,
+        pinned_model: None, pinned_runtime: None,
+        pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
+        claim_ttl_seconds: None, check_ttl_seconds: None,
+        settlement: None, stake_unit: Some(unit),
+        min_stake: None, verifier_fee_bps: None, forfeit: None,
+    }
+}
+
+/// Перевод CW20 в ответе: кому, сколько и каким токеном.
+fn cw20_transfer_in(res: &cosmwasm_std::Response, token: &str, to: &str, amount: u128) -> bool {
+    res.messages.iter().any(|m| match &m.msg {
+        cosmwasm_std::CosmosMsg::Wasm(cosmwasm_std::WasmMsg::Execute {
+            contract_addr, msg, funds,
+        }) => {
+            contract_addr == token && funds.is_empty()
+                && from_json::<serde_json::Value>(msg).unwrap()
+                    == serde_json::json!({"transfer": {
+                        "recipient": to, "amount": amount.to_string()}})
+        }
+        _ => false,
+    })
+}
+
+#[test]
+fn perenos_formy_4_ostavlyaet_zalog_rodnym() {
+    // Это перенос, который пойдёт на живую цепочку: четыре экземпляра на
+    // форме 4 (code_id 343). Единица залога НЕ меняется переносом —
+    // меняется только запись. Внесённый uaxm остаётся uaxm и возвращается
+    // uaxm.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    register_and_stake(deps.as_mut(), EXEC);
+    put_v3_config(deps.as_mut());
+    STATE_VERSION_FOR_TEST.save(deps.as_mut().storage, &4u16).unwrap();
+
+    let res = migrate(deps.as_mut(), mock_env(), MigrateMsg {}).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "from" && a.value == "4"));
+    assert!(res.attributes.iter().any(|a| a.key == "changed" && a.value == "stake_unit"));
+    assert!(res.attributes.iter().any(|a| a.key == "stake_unit" && a.value == STAKE));
+    let cfg: Config = from_json(
+        query(deps.as_ref(), mock_env(), QueryMsg::Config {}).unwrap()).unwrap();
+    assert_eq!(cfg.stake_unit, Settlement::Native(STAKE.into()));
+    assert_eq!(cfg.claim_ttl_seconds, CLAIM_TTL, "сроки взяты как были, а не 600 переносчика");
+
+    let res = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(MIN_STAKE) }).unwrap();
+    assert_eq!(res.messages[0].msg, cosmwasm_std::CosmosMsg::Bank(
+        cosmwasm_std::BankMsg::Send { to_address: EXEC.into(),
+            amount: coins(MIN_STAKE, STAKE) }), "uaxm вернулся uaxm");
+}
+
+#[test]
+fn zalog_v_bartr_vnositsya_cherez_receive_i_vozvrashchaetsya_bartr() {
+    let mut deps = mock_dependencies();
+    setup_bartr(deps.as_mut());
+    register_and_stake_bartr(deps.as_mut(), EXEC);
+    let e: Executor = from_json(query(deps.as_ref(), mock_env(),
+        QueryMsg::Executor { address: EXEC.into() }).unwrap()).unwrap();
+    assert_eq!(e.stake, Uint128::new(MIN_STAKE), "залог записан на отправителя Send");
+    assert_eq!(e.status, ExecutorStatus::Active);
+
+    // Залог работает: задание берётся.
+    let id = job_until_answered(deps.as_mut());
+    submit_checks_matching(deps.as_mut(), id, CHECKS as usize);
+    execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+
+    let res = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(MIN_STAKE) }).unwrap();
+    assert_eq!(res.messages.len(), 1);
+    assert!(cw20_transfer_in(&res, BARTR, EXEC, MIN_STAKE),
+            "возврат обязан идти переводом BARTR, а не BankMsg");
+}
+
+#[test]
+fn zalog_ne_na_kontrakt_tokena() {
+    // `info.sender` в Receive — контракт токена. Запиши залог на него, и
+    // забрать его смог бы тот, кто им не владеет.
+    let mut deps = mock_dependencies();
+    setup_bartr(deps.as_mut());
+    let err = stake_cw20(deps.as_mut(), BARTR, BARTR, MIN_STAKE).unwrap_err();
+    assert!(matches!(err, ContractError::ExecutorUnknown), "вышло {err:?}");
+}
+
+#[test]
+fn chuzhoy_token_zalogom_ne_stanovitsya() {
+    let mut deps = mock_dependencies();
+    setup_bartr(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::RegisterExecutor {
+            model: MODEL.into(), runtime: RUNTIME.into(), dtype: DTYPE.into(),
+            card_class: ARCH.into(), kernel_cache_hash: CACHE.into(),
+        }).unwrap();
+    // Расчётный токен — тоже CW20, но залогом он не является.
+    let err = stake_cw20(deps.as_mut(), CW20, EXEC, MIN_STAKE).unwrap_err();
+    assert!(matches!(err, ContractError::WrongCw20 { .. }), "вышло {err:?}");
+    let err = stake_cw20(deps.as_mut(), "самодельный", EXEC, MIN_STAKE).unwrap_err();
+    assert!(matches!(err, ContractError::WrongCw20 { .. }), "вышло {err:?}");
+    let err = stake_cw20(deps.as_mut(), BARTR, EXEC, 0).unwrap_err();
+    assert!(matches!(err, ContractError::WrongStakeDenom { .. }), "вышло {err:?}");
+}
+
+#[test]
+fn edinicy_zaloga_ne_smeshivayutsya() {
+    // Залог в BARTR — родная монета не принимается.
+    let mut deps = mock_dependencies();
+    setup_bartr(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::RegisterExecutor {
+            model: MODEL.into(), runtime: RUNTIME.into(), dtype: DTYPE.into(),
+            card_class: ARCH.into(), kernel_cache_hash: CACHE.into(),
+        }).unwrap();
+    let err = execute(deps.as_mut(), mock_env(), mock_info(EXEC, &coins(MIN_STAKE, STAKE)),
+        ExecuteMsg::DepositStake {}).unwrap_err();
+    assert!(matches!(err, ContractError::NotNativeStake { .. }), "вышло {err:?}");
+
+    // Залог родной монетой — CW20 не принимается, даже от расчётного токена.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let err = stake_cw20(deps.as_mut(), CW20, EXEC, MIN_STAKE).unwrap_err();
+    assert!(matches!(err, ContractError::NotCw20Stake), "вышло {err:?}");
+}
+
+#[test]
+fn edinicu_zaloga_ne_smenit_poka_zalog_lezhit() {
+    // Сумма в записи узла — число без единицы. Смени единицу при лежащем
+    // залоге, и внесённые uaxm вернулись бы BARTR.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]), ExecuteMsg::UpdateConfig {
+        admin: None, checks_required: None,
+        pinned_arch: None, kernel_cache_hash: None,
+        pinned_model: None, pinned_runtime: None,
+        pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
+        claim_ttl_seconds: None, check_ttl_seconds: None,
+        settlement: None, stake_unit: None,
+        min_stake: None, verifier_fee_bps: None,
+        forfeit: Some(Forfeit::ToAddress(Addr::unchecked(FORFEIT_TO))),
+    }).unwrap();
+    register_and_stake(deps.as_mut(), EXEC);
+    let to_bartr = only_stake_unit(Settlement::Cw20(Addr::unchecked(BARTR)));
+    let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]), to_bartr.clone())
+        .unwrap_err();
+    assert!(matches!(err, ContractError::StakeUnitLocked { .. }), "вышло {err:?}");
+
+    // Та же единица повторно — не смена, и не отказ.
+    execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+        only_stake_unit(Settlement::Native(STAKE.into()))).unwrap();
+
+    // Залог забран — единица меняется, и дальше залог идёт в BARTR.
+    execute(deps.as_mut(), mock_env(), mock_info(EXEC, &[]),
+        ExecuteMsg::WithdrawStake { amount: Uint128::new(MIN_STAKE) }).unwrap();
+    execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]), to_bartr).unwrap();
+    let res = stake_cw20(deps.as_mut(), BARTR, EXEC, MIN_STAKE).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "status" && a.value == "Active"),
+            "донёс до минимума в новой единице — снова допущен");
+}
+
+#[test]
+fn szhech_zalog_v_bartr_nelzya() {
+    // Сжигание BARTR — заявка на выкуп, а не стока. Отказ при настройке,
+    // а не при вердикте: иначе узнали бы об этом в момент наказания.
+    let mut deps = mock_dependencies();
+    setup_bartr(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]), ExecuteMsg::UpdateConfig {
+        admin: None, checks_required: None,
+        pinned_arch: None, kernel_cache_hash: None,
+        pinned_model: None, pinned_runtime: None,
+        pinned_dtype: None, conformance_limit_micro: None, conformance_ref: None,
+        claim_ttl_seconds: None, check_ttl_seconds: None,
+        settlement: None, stake_unit: None,
+        min_stake: None, verifier_fee_bps: None, forfeit: Some(Forfeit::Burn),
+    }).unwrap_err();
+    assert!(matches!(err, ContractError::BurnCw20Stake), "вышло {err:?}");
+
+    // И `setup` со сжиганием родного залога на BARTR не переведёшь.
+    let mut deps = mock_dependencies();
+    setup(deps.as_mut());
+    let err = execute(deps.as_mut(), mock_env(), mock_info(ADMIN, &[]),
+        only_stake_unit(Settlement::Cw20(Addr::unchecked(BARTR)))).unwrap_err();
+    assert!(matches!(err, ContractError::BurnCw20Stake), "вышло {err:?}");
+}
+
+#[test]
+fn vinovnogo_zalog_v_bartr_uhodit_po_adresu() {
+    let mut deps = mock_dependencies();
+    setup_bartr(deps.as_mut());
+    register_and_stake_bartr(deps.as_mut(), EXEC);
+    let id = job_until_answered(deps.as_mut());
+    submit_checks_mismatching(deps.as_mut(), id, CHECKS as usize);
+    let res = execute(deps.as_mut(), mock_env(), mock_info("anyone", &[]),
+        ExecuteMsg::Finalize { job_id: id }).unwrap();
+    assert!(res.attributes.iter().any(|a| a.key == "guilty" && a.value == "true"));
+    assert!(cw20_transfer_in(&res, BARTR, FORFEIT_TO, MIN_STAKE),
+            "конфискат обязан уйти переводом BARTR по адресу");
+    // Расчёт при этом идёт своим токеном, а не токеном залога.
+    assert!(cw20_transfer_in(&res, CW20, CLIENT, PRICE), "цена вернулась заказчику расчётным токеном");
 }

@@ -11,7 +11,7 @@ use crate::msg::{
     JobEntry, JobsResponse, MigrateMsg, NextJobResponse, QueryMsg, ReceiveHook,
 };
 use crate::state::{
-    Check, Config, ConfigV1, ConfigV2, Conformance, Executor, ExecutorStatus, Forfeit, Job,
+    Check, Config, ConfigV1, ConfigV2, ConfigV3, Conformance, Executor, ExecutorStatus, Forfeit, Job,
     JobState, Micro, MicroLog, Settlement, CHECKS, CONFIG, CURRENT_VERSION, EXECUTORS, JOBS,
     NEXT_JOB, STATE_VERSION,
 };
@@ -74,7 +74,13 @@ fn validate_uri(uri: &str) -> Result<(), ContractError> {
 /// идёт расчёт: иначе добавление родной монеты означало бы правку в
 /// каждом месте, где двигаются деньги, и одно из них забылось бы.
 fn pay(cfg: &Config, to: &Addr, amount: Uint128) -> StdResult<CosmosMsg> {
-    match &cfg.settlement {
+    transfer(&cfg.settlement, to, amount)
+}
+
+/// Перевод в любой единице. Через него идут и расчёт (`pay`), и возврат
+/// залога: с формы 5 залог тоже бывает CW20.
+fn transfer(unit: &Settlement, to: &Addr, amount: Uint128) -> StdResult<CosmosMsg> {
+    match unit {
         Settlement::Native(denom) => Ok(BankMsg::Send {
             to_address: to.to_string(),
             amount: vec![Coin {
@@ -99,6 +105,37 @@ fn cw20_transfer(token: &Addr, to: &Addr, amount: Uint128) -> StdResult<CosmosMs
         funds: vec![],
     }
     .into())
+}
+/// Адрес CW20 из сообщения проверяется: в сообщении он приходит как
+/// `Addr`, а `Addr` из сообщения НЕ проверен — это известная ловушка
+/// cosmwasm, и неверный адрес иначе всплыл бы при первой выплате.
+fn validate_unit(deps: Deps, unit: Settlement) -> StdResult<Settlement> {
+    Ok(match unit {
+        Settlement::Cw20(a) => Settlement::Cw20(deps.api.addr_validate(a.as_str())?),
+        native => native,
+    })
+}
+
+/// Сжигание залога в CW20 не принимается настройкой вовсе. У BARTR
+/// `burn` — заявка на выкуп через развязку, а не исчезновение монеты, то
+/// есть «сожжённый» конфискат превратился бы в требование контракта,
+/// которое забрать некому. Отказ при настройке, а не при вердикте: иначе
+/// узнали бы об этом ровно в момент, когда надо наказывать.
+fn check_forfeit(cfg: &Config) -> Result<(), ContractError> {
+    match (&cfg.forfeit, &cfg.stake_unit) {
+        (Forfeit::Burn, Settlement::Cw20(_)) => Err(ContractError::BurnCw20Stake),
+        _ => Ok(()),
+    }
+}
+
+/// Сколько залога лежит на контракте у всех узлов вместе. Перебор, а не
+/// счётчик: нужен только при смене единицы, а узлов в классе единицы.
+fn staked_total(deps: Deps) -> StdResult<Uint128> {
+    let mut total = Uint128::zero();
+    for r in EXECUTORS.range(deps.storage, None, None, Order::Ascending) {
+        total += r?.1.stake;
+    }
+    Ok(total)
 }
 use sha2::{Digest, Sha256};
 
@@ -180,20 +217,13 @@ pub fn instantiate(
         conformance_version: 1,
         claim_ttl_seconds: msg.claim_ttl_seconds,
         check_ttl_seconds: msg.check_ttl_seconds,
-        // Адрес CW20 проверяется здесь: в сообщении он приходит как
-        // Addr, а Addr из сообщения НЕ проверен — это известная ловушка
-        // cosmwasm, и неверный адрес иначе всплыл бы при первой выплате.
-        settlement: match msg.settlement {
-            Settlement::Cw20(a) => {
-                Settlement::Cw20(deps.api.addr_validate(a.as_str())?)
-            }
-            native => native,
-        },
-        stake_denom: msg.stake_denom,
+        settlement: validate_unit(deps.as_ref(), msg.settlement)?,
+        stake_unit: validate_unit(deps.as_ref(), msg.stake_unit)?,
         min_stake: msg.min_stake,
         verifier_fee_bps: msg.verifier_fee_bps,
         forfeit: msg.forfeit,
     };
+    check_forfeit(&cfg)?;
     CONFIG.save(deps.storage, &cfg)?;
     NEXT_JOB.save(deps.storage, &1u64)?;
     STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
@@ -228,64 +258,59 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
             code: CURRENT_VERSION,
         });
     }
-    if was != 1 && was != 2 && was != 3 {
+    if !(1..=4).contains(&was) {
         return Err(ContractError::MigrateUnknown { have: was });
-    }
-    // Форма 3 -> 4: настройки НЕ меняются, меняются записи узлов и
-    // заданий — у них появились адреса доставки. Переписывать их не
-    // нужно: оба поля читаются через `serde(default)`, то есть прежняя
-    // запись становится записью без адреса. Узел без адреса заданий не
-    // берёт, пока не отправит `SetEndpoint`, — и это видно ему же по
-    // отказу, а не молча.
-    if was == 3 {
-        STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
-        return Ok(Response::new()
-            .add_attribute("action", "migrate")
-            .add_attribute("from", was.to_string())
-            .add_attribute("to", CURRENT_VERSION.to_string())
-            .add_attribute("changed", "endpoint,prompt_uri,jobs_query"));
     }
     // Настройки читаются СВОЕЙ формой: нынешняя структура запрещает
     // неизвестные поля и не прощает пропущенных, поэтому ни байты формы
-    // 1 (там лишний `attestor`), ни байты формы 2 (там нет сроков) в неё
-    // не разберутся. Угадывать разбором «а вдруг подойдёт» нельзя:
-    // молчаливая ошибка на хранилище живой сети хуже отказа.
+    // 1 (там лишний `attestor`), ни формы 2 (там нет сроков), ни форм 3
+    // и 4 (там `stake_denom` строкой) в неё не разберутся. Угадывать
+    // разбором «а вдруг подойдёт» нельзя: молчаливая ошибка на хранилище
+    // живой сети хуже отказа.
     let raw = deps
         .storage
         .get(b"config")
         .ok_or(ContractError::MigrateNoConfig)?;
-    let v2: ConfigV2 = if was == 1 {
-        from_json::<ConfigV1>(&raw)?.to_v2()
-    } else {
+    // Формы 3 и 4 различаются записями узлов и заданий (адреса доставки
+    // читаются через `serde(default)`), а настройки у них одни.
+    let v3: ConfigV3 = if was >= 3 {
         from_json(&raw)?
+    } else {
+        let v2: ConfigV2 = if was == 1 {
+            from_json::<ConfigV1>(&raw)?.to_v2()
+        } else {
+            from_json(&raw)?
+        };
+        // Сроки при переносе берутся отсюда, а не из сообщения: сообщение
+        // пустое, и пусть остаётся пустым — значения всё равно надо будет
+        // подбирать по опыту сети, а менять их умеет UpdateConfig.
+        //
+        // 600 с на ответ: ответ на 4096 токенов идёт секунды, десять
+        // минут — запас на холодный старт и очередь. 3600 с на сбор
+        // проверок: проверяющих может не быть в сети прямо сейчас, а час —
+        // предел, за которым ждать уже незачем.
+        v2.to_v3(600, 3600)
     };
-    // Сроки при переносе берутся отсюда, а не из сообщения: сообщение
-    // пустое, и пусть остаётся пустым — значения всё равно надо будет
-    // подбирать по опыту сети, а менять их умеет UpdateConfig.
-    //
-    // 600 с на ответ: ответ на 4096 токенов идёт секунды, десять минут —
-    // запас на холодный старт и очередь. 3600 с на сбор проверок:
-    // проверяющих может не быть в сети прямо сейчас, а час — предел, за
-    // которым ждать уже незачем.
-    let cfg = v2.to_v3(600, 3600);
+    // Единица залога переносится КАК БЫЛА — родной монетой той же строки.
+    // Переезд на CW20 делается отдельно, `UpdateConfig`, и только при
+    // пустом залоге: перенос не должен менять, чем лежат чужие деньги.
+    let cfg = v3.to_v5();
     CONFIG.save(deps.storage, &cfg)?;
     STATE_VERSION.save(deps.storage, &CURRENT_VERSION)?;
+    let changed = match was {
+        1 => "attestor_dropped,ttl_added,endpoint,prompt_uri,jobs_query,stake_unit",
+        2 => "ttl_added,endpoint,prompt_uri,jobs_query,stake_unit",
+        3 => "endpoint,prompt_uri,jobs_query,stake_unit",
+        _ => "stake_unit",
+    };
     Ok(Response::new()
         .add_attribute("action", "migrate")
         .add_attribute("from", was.to_string())
         .add_attribute("to", CURRENT_VERSION.to_string())
-        // Форма 1 и 2 переходят сразу в 4: настройки доводятся до вида 3
-        // (сроки), а адреса доставки появляются сами — `serde(default)`.
-        .add_attribute(
-            "changed",
-            if was == 1 {
-                "attestor_dropped,ttl_added,endpoint,prompt_uri,jobs_query"
-            } else {
-                "ttl_added,endpoint,prompt_uri,jobs_query"
-            },
-        )
+        .add_attribute("changed", changed)
         .add_attribute("claim_ttl_seconds", cfg.claim_ttl_seconds.to_string())
-        .add_attribute("check_ttl_seconds", cfg.check_ttl_seconds.to_string()))
+        .add_attribute("check_ttl_seconds", cfg.check_ttl_seconds.to_string())
+        .add_attribute("stake_unit", cfg.stake_unit.label()))
 }
 
 #[entry_point]
@@ -309,7 +334,7 @@ pub fn execute(
             claim_ttl_seconds,
             check_ttl_seconds,
             settlement,
-            stake_denom,
+            stake_unit,
             min_stake,
             verifier_fee_bps,
             forfeit,
@@ -328,7 +353,7 @@ pub fn execute(
             claim_ttl_seconds,
             check_ttl_seconds,
             settlement,
-            stake_denom,
+            stake_unit,
             min_stake,
             verifier_fee_bps,
             forfeit,
@@ -407,7 +432,7 @@ fn update_config(
     claim_ttl_seconds: Option<u64>,
     check_ttl_seconds: Option<u64>,
     settlement: Option<Settlement>,
-    stake_denom: Option<String>,
+    stake_unit: Option<Settlement>,
     min_stake: Option<Uint128>,
     verifier_fee_bps: Option<u16>,
     forfeit: Option<Forfeit>,
@@ -481,15 +506,22 @@ fn update_config(
         }
     }
     if let Some(st) = settlement {
-        cfg.settlement = match st {
-            Settlement::Cw20(a) => {
-                Settlement::Cw20(deps.api.addr_validate(a.as_str())?)
-            }
-            native => native,
-        };
+        cfg.settlement = validate_unit(deps.as_ref(), st)?;
     }
-    if let Some(d) = stake_denom {
-        cfg.stake_denom = d;
+    if let Some(u) = stake_unit {
+        let u = validate_unit(deps.as_ref(), u)?;
+        // Сумма в записи узла — число без единицы. Смени единицу при
+        // лежащем залоге, и внесённые uaxm вернулись бы BARTR, а на
+        // контракте остались бы uaxm, которые не отдать никому.
+        if u != cfg.stake_unit {
+            let staked = staked_total(deps.as_ref())?;
+            if !staked.is_zero() {
+                return Err(ContractError::StakeUnitLocked {
+                    staked: format!("{} {}", staked, cfg.stake_unit.label()),
+                });
+            }
+        }
+        cfg.stake_unit = u;
     }
     if let Some(m) = min_stake {
         cfg.min_stake = m;
@@ -503,6 +535,7 @@ fn update_config(
     if let Some(f) = forfeit {
         cfg.forfeit = f;
     }
+    check_forfeit(&cfg)?;
     CONFIG.save(deps.storage, &cfg)?;
     Ok(Response::new()
         .add_attribute("action", "update_config")
@@ -604,17 +637,28 @@ fn set_endpoint(
         .add_attribute("endpoint", shown))
 }
 
+/// Залог родной монетой: монеты пришли с транзакцией.
 fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
+    let denom = match &cfg.stake_unit {
+        Settlement::Native(d) => d.clone(),
+        // При залоге в CW20 родная монета залогом не становится: иначе у
+        // одного узла залог лежал бы в двух единицах, а запись одна.
+        Settlement::Cw20(t) => {
+            return Err(ContractError::NotNativeStake {
+                want: t.to_string(),
+            })
+        }
+    };
     let sent = info
         .funds
         .iter()
-        .find(|c| c.denom == cfg.stake_denom)
+        .find(|c| c.denom == denom)
         .map(|c| c.amount)
         .unwrap_or_default();
     if sent.is_zero() {
         return Err(ContractError::WrongStakeDenom {
-            want: cfg.stake_denom.clone(),
+            want: denom,
             got: info
                 .funds
                 .iter()
@@ -623,8 +667,20 @@ fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
                 .join(","),
         });
     }
+    credit_stake(deps, &cfg, &info.sender, sent)
+}
+
+/// Записать пришедший залог на узел. Один путь для обеих единиц: залог
+/// родной монетой и залог через `Receive` различаются только тем, откуда
+/// пришли деньги, а правила зачисления у них общие.
+fn credit_stake(
+    deps: DepsMut,
+    cfg: &Config,
+    who: &Addr,
+    sent: Uint128,
+) -> Result<Response, ContractError> {
     let mut e = EXECUTORS
-        .may_load(deps.storage, &info.sender)?
+        .may_load(deps.storage, who)?
         .ok_or(ContractError::ExecutorUnknown)?;
     // Забаненному взнос НЕ принимается, и дело не в строгости: забрать
     // залог забаненный не может (см. withdraw_stake), а свой он потерял
@@ -651,10 +707,12 @@ fn deposit_stake(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractE
         e.status = ExecutorStatus::Active;
     }
     let status = format!("{:?}", e.status);
-    EXECUTORS.save(deps.storage, &info.sender, &e)?;
+    EXECUTORS.save(deps.storage, who, &e)?;
     Ok(Response::new()
         .add_attribute("action", "deposit_stake")
+        .add_attribute("executor", who)
         .add_attribute("stake", e.stake.to_string())
+        .add_attribute("unit", cfg.stake_unit.label())
         .add_attribute("status", status))
 }
 
@@ -690,13 +748,7 @@ fn withdraw_stake(
     }
     EXECUTORS.save(deps.storage, &info.sender, &e)?;
     Ok(Response::new()
-        .add_message(BankMsg::Send {
-            to_address: info.sender.to_string(),
-            amount: vec![Coin {
-                denom: cfg.stake_denom,
-                amount,
-            }],
-        })
+        .add_message(transfer(&cfg.stake_unit, &info.sender, amount)?)
         .add_attribute("action", "withdraw_stake")
         .add_attribute("stake", e.stake.to_string()))
 }
@@ -713,39 +765,56 @@ fn count_open_jobs(deps: Deps, who: &Addr) -> StdResult<u64> {
     Ok(n)
 }
 
-/// Приём CW20: расчётная единица не нативна, и это единственный путь, по
-/// которому монеты попадают в контракт вместе с заданием.
+/// Приём CW20: единственный путь, по которому токен CW20 попадает в
+/// контракт. Им приходят оплата задания (при расчёте CW20) и залог (при
+/// залоге в CW20) — единицы настраиваются порознь.
 fn receive_cw20(
     deps: DepsMut,
     info: MessageInfo,
     r: Cw20ReceiveMsg,
 ) -> Result<Response, ContractError> {
     let cfg = CONFIG.load(deps.storage)?;
-    // Вызов обязан прийти ОТ контракта расчётной единицы: иначе любой
-    // мог бы объявить задание оплаченным своим токеном.
-    let token = match &cfg.settlement {
-        Settlement::Cw20(t) => t.clone(),
-        // При расчёте родной монетой платёж CW20 заданием не становится:
-        // иначе задание оказалось бы оплачено не тем, чем платят все.
-        Settlement::Native(_) => return Err(ContractError::NotCw20Settlement),
+    // Вызов обязан прийти ОТ контракта нужной единицы: иначе любой мог бы
+    // объявить задание оплаченным, а залог внесённым своим токеном.
+    let from_token = |unit: &Settlement, native: ContractError| -> Result<(), ContractError> {
+        match unit {
+            Settlement::Cw20(t) if info.sender == *t => Ok(()),
+            Settlement::Cw20(t) => Err(ContractError::WrongCw20 {
+                want: t.to_string(),
+                got: info.sender.to_string(),
+            }),
+            Settlement::Native(_) => Err(native),
+        }
     };
-    if info.sender != token {
-        return Err(ContractError::WrongCw20 {
-            want: token.to_string(),
-            got: info.sender.to_string(),
-        });
-    }
-    if r.amount.is_zero() {
-        return Err(ContractError::ZeroPrice);
-    }
     match from_json(&r.msg)? {
         ReceiveHook::SubmitJob {
             prompt_hash,
             prompt_uri,
             price,
         } => {
+            // При расчёте родной монетой платёж CW20 заданием не
+            // становится: иначе задание оказалось бы оплачено не тем, чем
+            // платят все.
+            from_token(&cfg.settlement, ContractError::NotCw20Settlement)?;
+            if r.amount.is_zero() {
+                return Err(ContractError::ZeroPrice);
+            }
             let client = deps.api.addr_validate(&r.sender)?;
             create_job(deps, &cfg, client, prompt_hash, prompt_uri, price, r.amount)
+        }
+        ReceiveHook::DepositStake {} => {
+            from_token(&cfg.stake_unit, ContractError::NotCw20Stake)?;
+            if r.amount.is_zero() {
+                return Err(ContractError::WrongStakeDenom {
+                    want: cfg.stake_unit.label(),
+                    got: "0".to_string(),
+                });
+            }
+            // Залог записывается на того, кто сделал Send, — `r.sender`.
+            // `info.sender` здесь контракт токена, и записать залог на него
+            // значило бы отдать его тому, кто им не владеет.
+            let who = deps.api.addr_validate(&r.sender)?;
+            credit_stake(deps, &cfg, &who, r.amount)
         }
     }
 }
@@ -1431,22 +1500,20 @@ fn finalize(deps: DepsMut, job_id: u64) -> Result<Response, ContractError> {
         if !e.stake.is_zero() {
             let amount = e.stake;
             e.stake = Uint128::zero();
-            msgs.push(match &cfg.forfeit {
-                Forfeit::Burn => BankMsg::Burn {
+            msgs.push(match (&cfg.forfeit, &cfg.stake_unit) {
+                (Forfeit::Burn, Settlement::Native(denom)) => BankMsg::Burn {
                     amount: vec![Coin {
-                        denom: cfg.stake_denom.clone(),
+                        denom: denom.clone(),
                         amount,
                     }],
                 }
                 .into(),
-                Forfeit::ToAddress(to) => BankMsg::Send {
-                    to_address: to.to_string(),
-                    amount: vec![Coin {
-                        denom: cfg.stake_denom.clone(),
-                        amount,
-                    }],
+                // Настройка такого не пропускает (`check_forfeit`), но
+                // если бы пропустила — отказ, а не молчаливое сжигание.
+                (Forfeit::Burn, Settlement::Cw20(_)) => {
+                    return Err(ContractError::BurnCw20Stake)
                 }
-                .into(),
+                (Forfeit::ToAddress(to), unit) => transfer(unit, to, amount)?,
             });
         }
     } else {
