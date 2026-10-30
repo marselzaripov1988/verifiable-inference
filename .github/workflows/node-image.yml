@@ -103,10 +103,20 @@ jobs:
           probe "без карты не притворяется"      "nvidia-smi"     -e CONTRACT=axm1xxx -e ENDPOINT=http://1.2.3.4:8081
 
       - name: выложить
+        # Версия берётся из тега git: node-image-v2 -> v2. Прежде здесь
+        # стояло v1 намертво, и каждая сборка переписывала тег, на который
+        # уже ссылаются инструкции. Ручной запуск выкладывает только образ
+        # с именем коммита и чужих тегов не трогает.
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:v1"
           docker push "$IMAGE:${{ github.sha }}"
-          docker push "$IMAGE:v1"
+          ver=""
+          case "$GITHUB_REF" in
+            refs/tags/node-image-v*) ver="${GITHUB_REF_NAME#node-image-}" ;;
+          esac
+          if [ -n "$ver" ]; then
+            docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:$ver"
+            docker push "$IMAGE:$ver"
+          fi
           echo "digest, который можно назвать в инструкции:"
-          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:v1" || true
+          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${{ github.sha }}" || true
