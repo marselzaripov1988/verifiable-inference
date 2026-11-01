@@ -3,7 +3,7 @@
 ## Запуск узла
 
 Образ один, команды различает только `CONTRACT`. Образ берётся по
-digest, а не по тегу `v1`: тег можно переписать, digest — нет.
+digest, а не по тегу `v2`: тег можно переписать, digest — нет.
 
 **Тестовый** (RTX 4090, залог 0,1 AXM):
 
@@ -12,7 +12,7 @@ docker run -d --gpus all --name node-test -p 8081:8081 \
   -e CONTRACT=axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm \
   -e ENDPOINT=http://ВАШ-АДРЕС:ПОРТ \
   -e KEY_HEX=<64 знака рабочего ключа> \
-  ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:672a88a7129065b5c495398c18843cd6e28dacc62ecf1ca14fc59197a1826df9
+  ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:48bdb50b6fb76844632730d13a0710b4bcff308dd8c33119bf0b05086c89f3d3
 ```
 
 **Боевой** (RTX 4090, залог 30 400 AXM):
@@ -22,7 +22,7 @@ docker run -d --gpus all --name node -p 8081:8081 \
   -e CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r \
   -e ENDPOINT=http://ВАШ-АДРЕС:ПОРТ \
   -e KEY_HEX=<64 знака рабочего ключа> \
-  ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:672a88a7129065b5c495398c18843cd6e28dacc62ecf1ca14fc59197a1826df9
+  ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:48bdb50b6fb76844632730d13a0710b4bcff308dd8c33119bf0b05086c89f3d3
 ```
 
 Боевые реестры других классов подставляются в `CONTRACT` так же:
@@ -30,11 +30,12 @@ docker run -d --gpus all --name node -p 8081:8081 \
 `sm_120` (5090) — `axm1k2v4cjqfl5mqjutnyg5g4cgtatvj835p2sen8myefy40h4pv3ttscnqtwg`.
 Тестовый экземпляр есть только для 4090.
 
-Команды выше — образ **v1**, проверенный на картах. Есть **v2**
-(`sha256:48bdb50b…c89f3d3`, [node-image/README.md](protocol/node-image/README.md)):
-он нужен, когда реестры переедут на залог в BARTR, — v1 после этого не
-стартует. v2 проверен на карте 30 октября: ответ побайтово тот же, что у v1
-([запись](protocol/node-image/proverka-2026-10-30/README.md)).
+Команды выше — образ **v2** ([node-image/README.md](protocol/node-image/README.md)),
+проверенный на карте 30 октября: ответ побайтово тот же, что у v1
+([запись](protocol/node-image/proverka-2026-10-30/README.md)). **v1 с
+реестрами больше не работает**: 1 ноября они перенесены на форму 5
+(`stake_unit`), и v1 встаёт на шаге 2. Залог по-прежнему в AXM — переход
+на BARTR отдельной сделкой ещё не сделан.
 
 - `ENDPOINT` — адрес, по которому порт 8081 видно **снаружи**; на
   арендованных машинах внешний порт обычно другой.
@@ -142,5 +143,5 @@ sh protocol/devnet/run-list-test.sh             # лист тестового э
 Решено с тех пор: кто платит проверяющим — заказчик, сверх цены. И где
 брать текст: адреса доставки лежат в цепочке — у задания `prompt_uri`, у
 узла `endpoint`, — а не передаются людьми. Доверия это им не даёт, решает
-по-прежнему хэш. В живой цепочке с 28 октября: три экземпляра на
-`code_id` 343 ([protocol/РАЗВЁРТЫВАНИЕ.md](protocol/РАЗВЁРТЫВАНИЕ.md)).
+по-прежнему хэш. В живой цепочке с 28 октября: три боевых экземпляра и тестовый,
+с 1 ноября на `code_id` 355 ([protocol/РАЗВЁРТЫВАНИЕ.md](protocol/РАЗВЁРТЫВАНИЕ.md)).
