@@ -69,7 +69,8 @@ def make_handler(directory, access, retain, now=time.time,
                 self.send_error(404)
                 return
             try:
-                who = sign.requester(self.headers, self.path, now())
+                who = sign.requester(self.headers, self.path, now(),
+                                     access.hrp)
             except sign.Unsigned:
                 self.send_error(401, "signature required")
                 return

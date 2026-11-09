@@ -283,8 +283,11 @@ class BadSignature(Exception):
     """Подпись есть, но не та."""
 
 
-def requester(headers, path, now=None):
-    """Адрес спрашивающего по заголовкам. Нет подписи — Unsigned."""
+def requester(headers, path, now=None, hrp="axm"):
+    """Адрес спрашивающего по заголовкам. Нет подписи — Unsigned.
+
+    `hrp` — префикс адресов сети: `axm` у Axiome, `wasm` на стенде.
+    """
     k, t, s = (headers.get(H_KEY), headers.get(H_TIME), headers.get(H_SIG))
     if not (k or t or s):
         raise Unsigned("запрос без подписи")
@@ -297,7 +300,7 @@ def requester(headers, path, now=None):
         raise BadSignature(f"время подписи расходится на {int(now - t)} с")
     if not verify_digest(pub, _digest(path, t), sig):
         raise BadSignature("подпись не сходится")
-    return address(pub)
+    return address(pub, hrp)
 
 
 # --- шифрование ответа ----------------------------------------------------
@@ -393,6 +396,10 @@ class Access:
     def __init__(self, rest, contract, chainmod, ttl=20, now=time.time,
                  granters=None):
         self.rest, self.contract, self.chain = rest, contract, chainmod
+        #: Префикс адресов — тот же, что у адреса контракта: в Cosmos он
+        #: один на сеть. Иначе на стенде (wasm1…) адрес спрашивающего
+        #: вышел бы axm1… и не совпал ни с одним участником.
+        self.hrp = contract.split("1", 1)[0] if "1" in contract else "axm"
         self.ttl, self.now = ttl, now
         self._granters = granters or self._authz_granters
         self.cache = {}

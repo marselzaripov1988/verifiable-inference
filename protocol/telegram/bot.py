@@ -472,7 +472,7 @@ class Bot:
     def authorize(self, headers, path, ph):
         """Кому отдавать вопрос: None — отдать, иначе (код, причина)."""
         try:
-            who = sign.requester(headers, path, self.now())
+            who = sign.requester(headers, path, self.now(), self.access.hrp)
         except sign.Unsigned:
             if getattr(self.cfg, "allow_unsigned", False):
                 return None

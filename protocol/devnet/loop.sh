@@ -119,8 +119,14 @@ checks_field() {
 
 say "1. поднять цепочку"
 $B init devnet --chain-id $CH >/dev/null 2>&1
+# Ключи узлов и заказчика порождаются здесь и вносятся в связку как
+# hex: тот же ключ подписывает и сделки, и запросы текста (sign.py), а
+# выгружать ключ из связки обратно не нужно. Ключи одноразовые.
+mkdir -p /work/keys
 for n in admin client $NODES; do
-    $B keys add $n --keyring-backend test --home $D >/dev/null 2>&1
+    python3 -c "import os;print(os.urandom(32).hex())" > /work/keys/$n.key
+    $B keys import-hex $n "$(cat /work/keys/$n.key)" --keyring-backend test --home $D >/dev/null 2>&1 \
+        || fail "ключ $n не внесён"
 done
 sed -i 's/"ustake"/"stake"/g; s/"umlg"/"stake"/g' $D/config/genesis.json
 for n in admin client $NODES; do
@@ -225,11 +231,19 @@ python3 /work/fake-vllm.py 8000 >/tmp/vllm.log 2>&1 &
 # Связки отдаются по http — тем же, чем их отдавал бы узел в сети. Все
 # три узла раздают свои: адрес каждого лежит в цепочке, и кто окажется
 # исполнителем, решат они сами.
-( cd /work/b-n1 && python3 -m http.server 8081 >/tmp/h1.log 2>&1 & )
-( cd /work/b-n2 && python3 -m http.server 8082 >/tmp/h2.log 2>&1 & )
-( cd /work/b-n3 && python3 -m http.server 8083 >/tmp/h3.log 2>&1 & )
+# С 9 ноября не `http.server`: тот отдавал связку (вопрос и ответ) любому.
+# serve_bundles пускает только участников задания и шифрует ответ.
+R="--rest http://127.0.0.1:1317 --contract $REG"
+for k in 1 2 3; do
+    # shellcheck disable=SC2086
+    python3 /work/daemon/serve_bundles.py --dir /work/b-n$k --port 808$k $R \
+        >/tmp/h$k.log 2>&1 &
+done
 # Запросы раздаёт заказчик, и адрес этой раздачи он кладёт в задание.
-( cd /work/prompts && python3 -m http.server 8080 >/tmp/hp.log 2>&1 & )
+# Тоже только участникам: хэш запроса лежит в цепочке открыто.
+# shellcheck disable=SC2086
+python3 /work/daemon/serve_prompts.py --dir /work/prompts --port 8080 $R \
+    >/tmp/hp.log 2>&1 &
 i=0
 while [ $i -lt 20 ]; do
     v=$(wget -qO- http://127.0.0.1:8000/version 2>/dev/null | jq -r '.version' 2>/dev/null || echo "")
@@ -265,6 +279,24 @@ ok "запрос выложен под именем хэша: $PH.txt"
 uri=$(job_field prompt_uri)
 [ "$uri" = "http://127.0.0.1:8080" ] || fail "адрес запроса в задании: $uri"
 ok "адрес запроса лежит в самом задании: $uri"
+
+# Хэш запроса виден в цепочке всем, но текст по нему не отдаётся ни без
+# подписи, ни постороннему с подписью: задание ещё никто не взял.
+python3 - "$PH" <<'PY' || fail "запрос отдаётся не участнику"
+import os, sys, urllib.error, urllib.request
+sys.path.insert(0, "/work/daemon")
+import sign
+url = f"http://127.0.0.1:8080/{sys.argv[1]}.txt"
+def code(h):
+    try:
+        return urllib.request.urlopen(urllib.request.Request(url, headers=h)).status
+    except urllib.error.HTTPError as e:
+        return e.code
+a, b = code({}), code(sign.headers_for(os.urandom(32), url))
+assert (a, b) == (401, 403), (a, b)
+print(f"  без подписи {a}, посторонний {b}")
+PY
+ok "запрос по открытому хэшу не отдаётся ни без подписи, ни постороннему"
 
 # Запрос списка заданий — тот, из-за которого узел больше не перебирает
 # номера. Проверяется до запуска петель: иначе отказ выглядел бы их бедой.
@@ -302,7 +334,7 @@ for n in $NODES; do
         --send --key "$n" --binary wasmd --home "$D" \
         --node tcp://127.0.0.1:26657 --chain-id "$CH" \
         --gas-prices 0stake \
-        --bundles "/work/b-$n" $ee \
+        --bundles "/work/b-$n" $ee --sign-key "/work/keys/$n.key" \
         --state "/work/state/$n.json" --every 3 --max-tokens 120 \
         >"$LOG/$n.log" 2>&1 &
     eval "PID_$n=$!"
@@ -429,7 +461,7 @@ ok "совпадающий адрес заново не объявляется �
 say "10. заказчик забирает ответ и сверяет его с цепочкой"
 # Без --peers: заказчик тоже не знает, кто выполнил задание и где лежит
 # связка. Адрес исполнителя он спрашивает у цепочки.
-python3 /work/daemon/client.py collect \
+VI_SIGN_KEY_FILE=/work/keys/client.key python3 /work/daemon/client.py collect \
     --rest http://127.0.0.1:1317 --contract "$REG" --job-id "$JOB" \
     --out /work/ответ.txt \
     >/dev/null 2>/tmp/collect.err || { cat /tmp/collect.err; fail "заказчик не забрал ответ"; }
@@ -442,6 +474,34 @@ AH=$(job_field answer_hash)
 GOT=$(python3 -c "import hashlib;print(hashlib.sha256(open('/work/ответ.txt','rb').read()).hexdigest())")
 [ "$GOT" = "$AH" ] || fail "записанный ответ не тот: $GOT против $AH в цепочке"
 ok "ответ записан и сошёлся с хэшем из цепочки: $(wc -c < /work/ответ.txt) байт"
+
+say "10а. связка — только участникам и шифром"
+python3 - "$WHO_URI" "$JOB" <<'PY' || fail "связка отдаётся не так"
+import os, sys, urllib.error, urllib.request
+sys.path.insert(0, "/work/daemon")
+import sign
+url = f"{sys.argv[1]}/{sys.argv[2]}.json"
+def get(h):
+    try:
+        r = urllib.request.urlopen(urllib.request.Request(url, headers=h))
+        return r.status, r.headers.get(sign.H_SEALED), r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, None, b""
+key = sign.load_key("/work/keys/client.key")
+assert get({})[0] == 401, "без подписи"
+assert get(sign.headers_for(os.urandom(32), url))[0] == 403, "посторонний"
+st, sealed, body = get(sign.headers_for(key, url))
+assert st == 200 and sealed == "1", (st, sealed)
+assert b'"answer"' not in body, "по проводу открытый текст"
+assert b'"answer"' in sign.open_sealed(key, body), "заказчик не вскрыл"
+print(f"  без подписи 401, посторонний 403, заказчику шифр {len(body)} байт")
+PY
+ok "связку получает только заказчик, и по проводу идёт шифр"
+
+# Ответ в том же цикле, что и взятие: признак ускорения из 5baf713.
+grep -q "взято в этом цикле" "$LOG/$WHO.log" \
+    || { grep -E "claim_job|answer" "$LOG/$WHO.log" | head; fail "ответ не в цикле взятия"; }
+ok "исполнитель ответил в том же цикле, в котором взял задание"
 
 say "11. гонка за заданием не ломает петлю"
 # Двое из трёх обязаны были опоздать: задание одно. Петля должна была

@@ -28,7 +28,7 @@ cp "$HERE/loop.sh" "$HERE/fake-vllm.py" "$WORK/"
 # Демоны берутся из репозитория как есть: проверяется то, что лежит в
 # нём, а не копия с правками.
 for f in loop.py client.py tx.py chain.py delivery.py executor.py checker.py \
-         canon.py vllm_client.py; do
+         canon.py vllm_client.py sign.py serve_bundles.py serve_prompts.py; do
     cp "$HERE/../daemon/$f" "$WORK/daemon/"
 done
 
