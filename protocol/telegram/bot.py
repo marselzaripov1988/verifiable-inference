@@ -40,10 +40,22 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                 "..", "daemon"))
 import chain   # noqa: E402
 import client  # noqa: E402
+import delivery  # noqa: E402
+import sign    # noqa: E402
 import tx      # noqa: E402
 
 BARTR = "axm1uzldhz4dvv7k7gtc7jl5ahlj84eghc52p0r6zhnjca0d20dxcfkshsd8uz"
 TG_LIMIT = 4000  # у Telegram 4096; запас на заголовок
+
+# Узел не ведёт диалог, а продолжает текст (`/v1/completions`): голый вопрос
+# модель принимает за заголовок и дописывает к нему статью. Обёртка в шаблон
+# диалога Qwen превращает продолжение в ответ, и модель сама кончает его
+# `<|im_end|>`. Узлам и проверке это всё равно: хэш и пересчёт — от того же
+# текста, что выложен.
+CHAT_TEMPLATES = {
+    "qwen": "<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n",
+    "none": "{q}",
+}
 
 
 # --- настройки ------------------------------------------------------------
@@ -72,9 +84,23 @@ class Config:
         self.price = int(env.get("PRICE", "10000"))
         self.daily = int(env.get("DAILY_LIMIT", "3"))
         self.max_chars = int(env.get("MAX_CHARS", "2000"))
+        self.explorer = env.get("EXPLORER", "https://axiomechain.org")
+        self.template = env.get("CHAT_TEMPLATE", "qwen")
+        if self.template not in CHAT_TEMPLATES:
+            raise SystemExit(f"CHAT_TEMPLATE: одно из "
+                             f"{', '.join(CHAT_TEMPLATES)}, а не "
+                             f"{self.template!r}")
         self.open_timeout = int(env.get("OPEN_TIMEOUT", "900"))
         self.prompts = env.get("PROMPTS_DIR", "./prompts")
         self.port = int(env.get("PROMPT_PORT", "8080"))
+        #: Ключ кошелька бота (64 hex) для подписи запросов связок: узлы
+        #: отдают связку только заказчику задания. Без него ответы с узлов
+        #: нового образа не забрать.
+        self.sign_key = env.get("SIGN_KEY")
+        #: Отдавать вопрос и без подписи — только для узлов СТАРОГО образа,
+        #: которые не подписывают запросов. Тогда вопрос открытого задания
+        #: может скачать любой, кто следит за цепочкой.
+        self.allow_unsigned = env.get("ALLOW_UNSIGNED", "0") == "1"
         self.db = env.get("DB", "./bot.sqlite")
         self.admins = {int(x) for x in re.findall(r"-?\d+",
                                                    env.get("ADMINS", ""))}
@@ -125,6 +151,56 @@ class Telegram:
             pass
 
 
+TX_LABELS = {
+    "submit_job": "объявление и оплата",
+    "claim_job": "взято узлом",
+    "submit_answer": "ответ сдан",
+    "submit_check": "проверка",
+    "finalize": "вердикт и выплата",
+    "cancel_job": "задание снято",
+}
+
+
+def job_txs(node, contract, job_id, timeout=20):
+    """Сделки задания по порядку: [(действие, хэш)].
+
+    Обозреватель по номеру задания не ищет, а без хэшей человеку нечем
+    проверить, что вердикт записан в цепочке. Поиск — по событиям `wasm`
+    реестра в индексе узла; если индекс молчит, список просто пуст.
+    """
+    q = (f"\"wasm._contract_address='{contract}' AND "
+         f"wasm.job_id={int(job_id)}\"")
+    url = (f"{node.rstrip('/')}/tx_search?query={urllib.parse.quote(q)}"
+           f"&per_page=50&order_by=%22asc%22")
+    # Cloudflare перед RPC отвечает 403 на подпись urllib по умолчанию.
+    req = urllib.request.Request(url, headers={"User-Agent": "vi-bot/1.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        txs = json.loads(r.read()).get("result", {}).get("txs") or []
+    out = []
+    for t in txs:
+        for e in t.get("tx_result", {}).get("events", []):
+            at = {a.get("key"): a.get("value") for a in e.get("attributes", [])}
+            if (e.get("type") == "wasm" and at.get("_contract_address") == contract
+                    and at.get("action") in TX_LABELS):
+                out.append((at["action"], t["hash"]))
+                break
+    return out
+
+
+def links_text(txs, explorer):
+    """Блок ссылок на обозреватель; пустая строка, если сделок нет."""
+    if not txs:
+        return ""
+    lines, n = ["🔗 В блокчейне:"], 0
+    for action, h in txs:
+        label = TX_LABELS[action]
+        if action == "submit_check":
+            n += 1
+            label = f"{label} {n}"
+        lines.append(f"{label} — {explorer.rstrip('/')}/transactions/{h}")
+    return "\n".join(lines)
+
+
 def split_text(text, limit=TG_LIMIT):
     """Длинный ответ — несколькими сообщениями, по границам строк."""
     out, cur = [], ""
@@ -164,6 +240,11 @@ class Store:
                 last TEXT, down INTEGER DEFAULT 0,
                 PRIMARY KEY(chat, address));
             """)
+            # Хэш запроса — чтобы знать, какой файл раздавать и какой
+            # стереть. Столбец добавлен 9 ноября; старые базы дополняются.
+            cols = [r[1] for r in self.db.execute("PRAGMA table_info(jobs)")]
+            if "prompt_hash" not in cols:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN prompt_hash TEXT")
             self.db.commit()
 
     def q(self, sql, *args):
@@ -196,14 +277,24 @@ class Store:
 
 # --- раздача запросов -----------------------------------------------------
 
-NAME = re.compile(r"^/([0-9a-f]{64}|\d+)\.txt$")
+NAME = re.compile(r"^/([0-9a-f]{64})\.txt$")
 
 
-def serve_prompts(directory, port):
-    """Отдавать узлам тексты запросов: `<хэш>.txt` и `<номер>.txt`.
+def serve_prompts(directory, port, allowed=None, auth=None):
+    """Отдавать узлам тексты запросов: только `<хэш>.txt`.
 
     Ничего кроме: ни списка каталога, ни других файлов. Доверия к этому
     адресу узлам не нужно — текст они сверяют с хэшем из задания.
+
+    `allowed` — функция, возвращающая хэши заданий В РАБОТЕ. Хэш запроса
+    лежит в цепочке открыто, поэтому без этого ограничения любой читатель
+    цепочки скачал бы все вопросы, и закрытые тоже: так и было до 9
+    ноября. Имени `<номер>.txt` больше нет — номера идут подряд, и по ним
+    вопросы перебирались бы ещё проще.
+
+    `auth(headers, path, хэш)` — None, если отдавать, иначе (код,
+    причина): пускает только участников задания по подписи запроса (см.
+    daemon/sign.py). Несуществующий и закрытый — 404 до проверки подписи.
     """
     directory = os.path.abspath(directory)
 
@@ -211,9 +302,16 @@ def serve_prompts(directory, port):
         def do_GET(self):
             m = NAME.match(self.path)
             p = m and os.path.join(directory, m.group(0)[1:])
+            if m and allowed is not None and m.group(1) not in allowed():
+                p = None
             if not p or not os.path.isfile(p):
                 self.send_error(404)
                 return
+            if auth is not None:
+                denied = auth(self.headers, self.path, m.group(1))
+                if denied:
+                    self.send_error(*denied)
+                    return
             with open(p, "rb") as f:
                 body = f.read()
             self.send_response(200)
@@ -346,15 +444,45 @@ HELP = """Бот проверяемого вывода на Axiome.
 class Bot:
     def __init__(self, cfg, api, store, sender, chainmod=chain,
                  fetch=client.fetch_answer, sources=client.answer_sources,
-                 ping=reachable, now=time.time):
+                 ping=reachable, now=time.time, txs=job_txs):
         self.cfg, self.api, self.store = cfg, api, store
         self.sender, self.chain = sender, chainmod
         self.fetch, self.sources, self.ping, self.now = (fetch, sources,
                                                          ping, now)
+        self.txs = txs
         # Одна сделка за раз: у кошелька один номер последовательности, и
         # две одновременные отправки — отказ одной из них.
         self.tx_lock = threading.Lock()
         self._params, self._params_at = None, 0
+        #: Хэши, выложенные до сделки и ещё не записанные в базу: между
+        #: файлом и строкой в базе проходит сделка, и раздавать текст в
+        #: это время уже нужно.
+        self.pending = set()
+        self.access = sign.Access(cfg.rest, cfg.contract, chainmod, now=now)
+
+    def authorize(self, headers, path, ph):
+        """Кому отдавать вопрос: None — отдать, иначе (код, причина)."""
+        try:
+            who = sign.requester(headers, path, self.now())
+        except sign.Unsigned:
+            if getattr(self.cfg, "allow_unsigned", False):
+                return None
+            return 401, "signature required"
+        except sign.BadSignature as e:
+            return 403, "bad signature"
+        rows = self.store.q("SELECT job_id FROM jobs WHERE prompt_hash=? AND "
+                            "done=0", ph)
+        why = "задание ещё не в цепочке"
+        for (job_id,) in rows:
+            try:
+                job = self.access.job(job_id)
+            except chain.ChainUnavailable:
+                return 503, "chain unavailable"
+            allowed, why = self.access.may_read("prompt", job, who)
+            if allowed:
+                return None
+        print(f"вопрос {ph[:12]}… не отдан: {why}", file=sys.stderr)
+        return 403, "not a job participant"
 
     def params(self):
         if not self._params or self.now() - self._params_at > 300:
@@ -378,9 +506,12 @@ class Bot:
                 and chat not in self.cfg.admins:
             self.api.send(chat, "Бот пока в закрытом тесте.")
             return
-        cmd, _, arg = text.partition(" ")
-        cmd = cmd.split("@")[0].lower()
-        arg = arg.strip()
+        # Любой пробел, а не только ASCII: Telegram на телефоне присылает
+        # «/job 9» с неразрывным пробелом, и partition(" ") видел команду
+        # «/job\xa09», которой нет.
+        parts = text.split(None, 1)
+        cmd = parts[0].split("@")[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
         try:
             if cmd in ("/start", "/help"):
                 self.api.send(chat, HELP)
@@ -445,7 +576,18 @@ class Bot:
         p = self.params()
         job = self.chain.load_job(self.cfg.rest, self.cfg.contract, int(arg))
         checks = self.checks(job, int(arg))
-        return f"Задание {arg}: {stage(job, p, checks)}"
+        links = self.links(int(arg))
+        text = f"Задание {arg}: {stage(job, p, checks)}"
+        return f"{text}\n\n{links}" if links else text
+
+    def links(self, job_id):
+        try:
+            return links_text(self.txs(self.cfg.node, self.cfg.contract,
+                                       job_id), self.cfg.explorer)
+        except Exception as e:
+            # Ссылки — довесок: без них состояние всё равно сообщается.
+            print(f"сделки задания {job_id}: {e}", file=sys.stderr)
+            return ""
 
     def checks(self, job, job_id):
         if str(job.get("state", "")).lower() not in ("answered", "settled"):
@@ -486,39 +628,108 @@ class Bot:
             return
         msg = self.api.send(chat, "📨 Ставлю задание в сеть…")
         try:
-            job_id, txhash = self.submit(prompt)
+            job_id, txhash, ph = self.submit(prompt)
         except Exception as e:
             if not unlimited:
                 self.store.give_back(chat, day)
             self.api.edit(chat, msg, f"Не удалось поставить задание: "
                                      f"{str(e)[:300]}")
             return
-        self.store.q("INSERT INTO jobs(job_id,chat,msg,created,state) "
-                     "VALUES(?,?,?,?,?)", job_id, chat, msg, self.now(),
-                     "open")
+        self.store.q("INSERT INTO jobs(job_id,chat,msg,created,state,"
+                     "prompt_hash) VALUES(?,?,?,?,?,?)", job_id, chat, msg,
+                     self.now(), "open", ph)
+        self.pending.discard(ph)
         self.api.edit(chat, msg, f"Задание {job_id}: ⏳ ждёт исполнителя\n"
                                  f"сделка {txhash}")
 
-    def submit(self, prompt):
+    def submit(self, question):
         p = self.params()
+        prompt = CHAT_TEMPLATES[self.cfg.template].format(q=question)
         ph = chain.text_hash(prompt)
         # Текст выкладывается ДО сделки: задание возьмут сразу, и брать
         # текст узлу должно быть уже откуда.
         os.makedirs(self.cfg.prompts, exist_ok=True)
-        with open(os.path.join(self.cfg.prompts, f"{ph}.txt"), "w",
-                  encoding="utf-8", newline="") as f:
+        path = os.path.join(self.cfg.prompts, f"{ph}.txt")
+        with open(path, "w", encoding="utf-8", newline="") as f:
             f.write(prompt)
+        self.pending.add(ph)
         msg, funds, to = client.submit_message(p, ph, self.cfg.price,
                                                self.cfg.prompt_uri)
         if to:
             msg["send"]["contract"] = self.cfg.contract
-        with self.tx_lock:
-            res = self.sender.send(msg, funds=funds, contract=to)
+        try:
+            with self.tx_lock:
+                res = self.sender.send(msg, funds=funds, contract=to)
+        except Exception:
+            # Задания нет — и текст лежать не должен.
+            self.pending.discard(ph)
+            if ph not in self.active_hashes():
+                self._remove(path)
+            raise
         job_id = tx.attribute(res.get("tx"), "job_id")
         if job_id is None:
             raise RuntimeError(f"сделка {res.get('txhash')} прошла, но "
                                f"номера задания в ней нет")
-        return int(job_id), res.get("txhash")
+        return int(job_id), res.get("txhash"), ph
+
+    # --- тексты вопросов --------------------------------------------------
+
+    def active_hashes(self):
+        """Хэши запросов, которые ещё нужны узлам: задание не закрыто."""
+        rows = self.store.q("SELECT prompt_hash FROM jobs WHERE done=0 "
+                            "AND prompt_hash IS NOT NULL")
+        return {r[0] for r in rows} | set(self.pending)
+
+    @staticmethod
+    def _remove(path):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    def forget(self, job_id):
+        """Задание закрыто: стереть текст вопроса и сохранённый ответ.
+
+        Ответ человеку уже отправлен, а держать вопросы и ответы впрок —
+        значит держать то, что можно украсть с сервера. Файл стирается,
+        только если тот же вопрос не задан в другом открытом задании.
+        """
+        rows = self.store.q("SELECT prompt_hash FROM jobs WHERE job_id=?",
+                            job_id)
+        self.store.q("UPDATE jobs SET answer=NULL WHERE job_id=?", job_id)
+        ph = rows[0][0] if rows else None
+        if ph and ph not in self.active_hashes():
+            self._remove(os.path.join(self.cfg.prompts, f"{ph}.txt"))
+
+    def purge(self):
+        """При запуске: стереть всё, что не нужно заданиям в работе.
+
+        У строк, записанных до появления столбца `prompt_hash`, хэш берётся
+        из цепочки; не вышло — файлы не трогаются, чтобы не оставить узел
+        без текста посреди задания.
+        """
+        unknown = self.store.q("SELECT job_id FROM jobs WHERE done=0 AND "
+                               "prompt_hash IS NULL")
+        for (job_id,) in unknown:
+            try:
+                job = self.chain.load_job(self.cfg.rest, self.cfg.contract,
+                                          job_id)
+            except chain.ChainUnavailable:
+                print(f"чистка: задание {job_id} не прочитано — файлы "
+                      f"не трогаю", file=sys.stderr)
+                return 0
+            self.store.q("UPDATE jobs SET prompt_hash=? WHERE job_id=?",
+                         job.get("prompt_hash"), job_id)
+        self.store.q("UPDATE jobs SET answer=NULL WHERE done=1")
+        keep = self.active_hashes()
+        n = 0
+        if os.path.isdir(self.cfg.prompts):
+            for name in os.listdir(self.cfg.prompts):
+                m = re.fullmatch(r"([0-9a-f]{64}|\d+)\.txt", name)
+                if m and m.group(1) not in keep:
+                    self._remove(os.path.join(self.cfg.prompts, name))
+                    n += 1
+        return n
 
     # --- присмотр ---------------------------------------------------------
 
@@ -572,8 +783,12 @@ class Bot:
             text = (f"⚠️ Задание {job_id} закрыто без вердикта: проверки не "
                     f"собрались в срок. Деньги вернулись, ответ не "
                     f"подтверждён — не показываю.")
+        links = self.links(job_id)
+        if links:
+            text = f"{text}\n\n{links}"
         self.api.send(chat, text)
         self.store.q("UPDATE jobs SET done=1 WHERE job_id=?", job_id)
+        self.forget(job_id)
 
     def cancel(self, chat, job_id):
         try:
@@ -590,6 +805,7 @@ class Bot:
                             f"Задание снято, вопрос в лимите возвращён.")
         self.store.give_back(chat, self.day())
         self.store.q("UPDATE jobs SET done=1 WHERE job_id=?", job_id)
+        self.forget(job_id)
 
     def tick_nodes(self):
         p = self.params()
@@ -645,7 +861,24 @@ def main():
     p = bot.params()
     print(f"кошелёк {sender.address()}, реестр {cfg.contract}, модель "
           f"{p.pinned_model}", file=sys.stderr)
-    serve_prompts(cfg.prompts, cfg.port)
+    n = bot.purge()
+    if n:
+        print(f"стёрто текстов закрытых заданий: {n}", file=sys.stderr)
+    if cfg.sign_key:
+        key = sign.load_key(cfg.sign_key)
+        mine = sign.address(sign.pubkey(key))
+        if mine != sender.address():
+            raise SystemExit(f"SIGN_KEY даёт {mine}, а кошелёк бота "
+                             f"{sender.address()}: узлы не отдадут связки")
+        delivery.set_sign_key(key)
+    else:
+        print("ВНИМАНИЕ: SIGN_KEY не задан — связки с узлов нового образа "
+              "не забрать", file=sys.stderr)
+    if cfg.allow_unsigned:
+        print("ВНИМАНИЕ: ALLOW_UNSIGNED=1 — вопрос открытого задания отдаётся "
+              "без подписи", file=sys.stderr)
+    serve_prompts(cfg.prompts, cfg.port, allowed=bot.active_hashes,
+                  auth=bot.authorize)
     print(f"запросы раздаются на :{cfg.port}, снаружи {cfg.prompt_uri}",
           file=sys.stderr)
     every(15, bot.tick_jobs)

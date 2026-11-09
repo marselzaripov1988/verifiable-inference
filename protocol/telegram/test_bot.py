@@ -12,7 +12,9 @@
   * **невзятое задание снимается**, и деньги и вопрос возвращаются;
   * **владелец узла узнаёт об обвинении и о молчащем адресе**, а о
     недоступности цепочки — нет: это не новость об узле;
-  * **раздача запросов отдаёт только `<хэш>.txt` и `<номер>.txt`.**
+  * **раздача запросов отдаёт только `<хэш>.txt` заданий в работе**, а
+    после закрытия задания текст вопроса и ответ стираются: хэш лежит в
+    цепочке открыто, и иначе вопросы скачал бы любой её читатель.
 
 Запуск:  python protocol/telegram/test_bot.py
 """
@@ -120,6 +122,8 @@ class Cfg:
         self.rest = "rest"
         self.price, self.daily, self.max_chars = 10000, 2, 100
         self.open_timeout = 900
+        self.template = "qwen"
+        self.node, self.explorer = "rpc", "https://axiomechain.org"
         self.prompts = os.path.join(tmp, "prompts")
         self.admins, self.allowed = set(), set()
 
@@ -136,7 +140,11 @@ def make(tmp, fail=False, answer="Сеть проверяет подпись."):
     b = bot.Bot(cfg, Api(), bot.Store(":memory:"),
                 Sender(cfg.prompts, fail), chainmod=Chain(), fetch=fetch,
                 sources=lambda *a: ("http://node",), ping=lambda e: True,
-                now=lambda: clock[0])
+                now=lambda: clock[0],
+                txs=lambda node, contract, job_id: [
+                    ("submit_job", "AA"), ("claim_job", "BB"),
+                    ("submit_answer", "CC"), ("submit_check", "DD"),
+                    ("submit_check", "EE"), ("finalize", "FF")])
     return b, clock, fetched
 
 
@@ -152,8 +160,12 @@ def test_ask_and_confirmed(tmp):
     b, clock, _ = make(tmp)
     b.handle(msg(1, "Что такое блокчейн?"))
     m, funds, to = b.sender.sent[0]
-    ph = chain.text_hash("Что такое блокчейн?")
+    wrapped = ("<|im_start|>user\nЧто такое блокчейн?<|im_end|>\n"
+               "<|im_start|>assistant\n")
+    ph = chain.text_hash(wrapped)
     ok(b.sender.seen_file, "текст запроса выложен до сделки")
+    with open(os.path.join(b.cfg.prompts, f"{ph}.txt"), encoding="utf-8") as f:
+        ok(f.read() == wrapped, "вопрос выложен в шаблоне диалога Qwen")
     ok(m["submit_job"]["prompt_uri"] == "http://vps:8080"
        and m["submit_job"]["prompt_hash"] == ph, "сделка с адресом и хэшем")
     ok(funds == "10485uaxm", "цена плюс доля проверяющих, округление вверх")
@@ -171,9 +183,62 @@ def test_ask_and_confirmed(tmp):
     last = b.api.sent[-1][1]
     ok("подтверждён" in last and "Сеть проверяет подпись." in last,
        "после вердикта — ответ с пометкой «подтверждён»")
+    ok("проверка 2 — https://axiomechain.org/transactions/EE" in last
+       and "вердикт и выплата — https://axiomechain.org/transactions/FF"
+       in last, "к вердикту приложены ссылки на сделки задания")
     n = len(b.api.sent)
     b.tick_jobs()
     ok(len(b.api.sent) == n, "закрытое задание больше не трогается")
+    ok(not os.path.exists(os.path.join(b.cfg.prompts, f"{ph}.txt")),
+       "после вердикта текст вопроса стёрт с сервера")
+    ok(b.store.q("SELECT answer FROM jobs WHERE job_id=7") == [(None,)],
+       "и ответ в базе не хранится")
+    ok(ph not in b.active_hashes(), "и больше не раздаётся")
+
+
+def test_privacy(tmp):
+    b, clock, _ = make(tmp)
+    b.handle(msg(1, "вопрос один"))
+    ph = b.store.q("SELECT prompt_hash FROM jobs WHERE job_id=7")[0][0]
+    ok(ph in b.active_hashes(), "текст задания в работе раздаётся")
+    b.chain.jobs[7] = {"state": "open"}
+    clock[0] += 901
+    b.tick_jobs()
+    ok(not os.path.exists(os.path.join(b.cfg.prompts, f"{ph}.txt")),
+       "снятое задание: текст стёрт")
+
+    f, _, _ = make(tmp, fail=True)
+    f.handle(msg(2, "не ушло"))
+    ok(not [n for n in os.listdir(f.cfg.prompts) if n.endswith(".txt")],
+       "сделка не прошла — текст не остался")
+
+    c, _, _ = make(os.path.join(tmp, "purge"))
+    os.makedirs(c.cfg.prompts)
+    c.handle(msg(3, "живой"))
+    live = c.store.q("SELECT prompt_hash FROM jobs")[0][0]
+    for name in ("b" * 64 + ".txt", "12.txt", "notes.md"):
+        with open(os.path.join(c.cfg.prompts, name), "w") as fh:
+            fh.write("x")
+    c.store.q("INSERT INTO jobs(job_id,chat,msg,created,state,answer,done) "
+              "VALUES(1,3,1,0,'settled','старый ответ',1)")
+    ok(c.purge() == 2, "чистка при запуске стёрла два чужих текста")
+    left = sorted(os.listdir(c.cfg.prompts))
+    ok(left == sorted([f"{live}.txt", "notes.md"]),
+       f"живой текст и посторонний файл остались ({left})")
+    ok(c.store.q("SELECT answer FROM jobs WHERE job_id=1") == [(None,)],
+       "старые ответы из базы стёрты")
+
+
+def test_job_command(tmp):
+    b, _, _ = make(tmp)
+    b.chain.jobs[7] = {"state": "settled", "answer_hash": "h",
+                       "guilty": False, "executor": NODE, "_checks": 2}
+    b.handle(msg(1, "/job 7"))
+    last = b.api.sent[-1][1]
+    ok(last.startswith("Задание 7:"),
+       "/job с неразрывным пробелом — та же команда")
+    ok("объявление и оплата — https://axiomechain.org/transactions/AA"
+       in last, "/job отдаёт ссылки на сделки задания")
 
 
 def test_guilty_and_no_verdict(tmp):
@@ -272,11 +337,15 @@ def test_prompt_server(tmp):
     for name, body in ((f"{h}.txt", "вопрос"), ("bot.sqlite", "секрет")):
         with open(os.path.join(d, name), "w", encoding="utf-8") as f:
             f.write(body)
-    srv = bot.serve_prompts(d, 0)
+    closed = "c" * 64
+    with open(os.path.join(d, f"{closed}.txt"), "w", encoding="utf-8") as f:
+        f.write("закрытый вопрос")
+    srv = bot.serve_prompts(d, 0, allowed=lambda: {h})
     port = srv.server_address[1]
     got = urllib.request.urlopen(f"http://127.0.0.1:{port}/{h}.txt").read()
     ok(got.decode() == "вопрос", "запрос по хэшу отдаётся")
-    for path in ("/bot.sqlite", "/../bot.py", "/"):
+    for path in ("/bot.sqlite", "/../bot.py", "/", f"/{closed}.txt",
+                 "/7.txt"):
         try:
             urllib.request.urlopen(f"http://127.0.0.1:{port}{path}")
             ok(False, f"{path} не отдаётся")
@@ -303,6 +372,46 @@ def test_prompt_server(tmp):
     ok(not bot.reachable("http://127.0.0.1:9"), "нет соединения — не жив")
 
 
+def test_signed_prompt(tmp):
+    import sign
+    b, _, _ = make(tmp)
+    b.handle(msg(1, "тайный вопрос"))
+    ph = b.store.q("SELECT prompt_hash FROM jobs WHERE job_id=7")[0][0]
+    ex_key, ch_key, out_key = os.urandom(32), os.urandom(32), os.urandom(32)
+    ex = sign.address(sign.pubkey(ex_key))
+    ch = sign.address(sign.pubkey(ch_key))
+    b.chain.jobs[7] = {"state": "claimed", "executor": ex}
+    b.chain.nodes[ch] = {"status": "active"}
+    b.access.granters = None
+    b.access._granters = lambda g: set()
+    srv = bot.serve_prompts(b.cfg.prompts, 0, allowed=b.active_hashes,
+                            auth=b.authorize)
+    url = f"http://127.0.0.1:{srv.server_address[1]}/{ph}.txt"
+
+    def get(key=None):
+        h = {}
+        if key:
+            # Время подписи — по часам бота: в тесте они подставные.
+            h = sign.headers_for(key, url, now=b.now())
+        try:
+            r = urllib.request.urlopen(urllib.request.Request(url, headers=h))
+            return r.status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    ok(get() == 401, "без подписи вопрос не отдаётся")
+    ok(get(out_key) == 403, "посторонний с подписью — отказ")
+    ok(get(ch_key) == 403, "другой узел, пока ответ не сдан, — отказ")
+    ok(get(ex_key) == 200, "исполнитель задания получает вопрос")
+    b.chain.jobs[7] = {"state": "answered", "executor": ex}
+    b.access.cache.clear()
+    ok(get(ch_key) == 200, "ответ сдан — проверяющий получает вопрос")
+    ok(get(out_key) == 403, "посторонний по-прежнему — нет")
+    b.cfg.allow_unsigned = True
+    ok(get() == 200, "ALLOW_UNSIGNED=1 — для старого образа узла")
+    srv.shutdown()
+
+
 def test_split():
     parts = bot.split_text("строка\n" * 1000, limit=100)
     ok(all(len(p) <= 100 for p in parts) and "".join(parts) == "строка\n" * 1000,
@@ -312,9 +421,11 @@ def test_split():
 if __name__ == "__main__":
     tmp = tempfile.mkdtemp()
     try:
-        for t in (test_ask_and_confirmed, test_guilty_and_no_verdict,
+        for t in (test_ask_and_confirmed, test_job_command,
+                  test_guilty_and_no_verdict,
                   test_answer_unreachable, test_limits, test_open_timeout,
-                  test_nodes, test_prompt_server):
+                  test_nodes, test_prompt_server, test_privacy,
+                  test_signed_prompt):
             t(tempfile.mkdtemp(dir=tmp))
         test_split()
     finally:
