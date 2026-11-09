@@ -767,6 +767,85 @@ def test_tsikl_cherez_podstavnuyu_tsepochku():
         chain.chain_time = real_time
 
 
+class Claiming(Catcher):
+    """Отправитель, у которого `claim_job` меняет подставную цепочку.
+
+    `who` — кто окажется исполнителем после взятия: обычно мы, но
+    проверяется и случай, когда цепочка показывает другого.
+    `fail_answer` — текст отказа на `submit_answer`.
+    """
+
+    def __init__(self, fake, now, who=ME, fail_answer=None):
+        super().__init__()
+        self.fake, self.now, self.who = fake, now, who
+        self.fail_answer = fail_answer
+
+    def send(self, msg, funds=None, contract=None):
+        kind = next(iter(msg))
+        if kind == "submit_answer" and self.fail_answer:
+            raise tx.TxFailed(self.fail_answer)
+        if kind == "claim_job":
+            n = int(msg["claim_job"]["job_id"])
+            j = dict(self.fake.jobs[n])
+            j.update(state="claimed", executor=self.who,
+                     claimed_at=self.now)
+            self.fake.jobs[n] = j
+        return super().send(msg, funds, contract)
+
+
+def test_otvet_v_tom_zhe_tsikle():
+    print("\n### взятое задание получает ответ в том же цикле")
+    now = 10_000
+    real_time = chain.chain_time
+    chain.chain_time = lambda rest, timeout=20: now
+    answer = {"submit_answer": {"job_id": 2, "answer_hash": "a" * 64,
+                                "logprobs_hash": "b" * 64,
+                                "answer_tokens": 120}}
+
+    def run(sender_kw):
+        f = FakeChain({1: job("settled"), 2: job("open")})
+        install(f)
+        sender = Claiming(f, now, **sender_kw)
+        lp = loop.Loop("http://rest", "axm1c", sender, "http://vllm/v1",
+                       CFG["pinned_model"], out=open(os.devnull, "w"))
+        seen = []
+
+        def fake_answer(job_id, j, params, t, record=None):
+            seen.append((job_id, j.get("state"), j.get("executor"), t))
+            return answer
+        lp.do_answer = fake_answer
+        return lp.cycle(), sender, seen
+
+    try:
+        r, sender, seen = run({})
+        ok([s["do"] for s in r["sent"]] == ["claim_job", "answer"],
+           f"взятие и ответ в одном цикле (вышло "
+           f"{[s['do'] for s in r['sent']]})")
+        ok([next(iter(m)) for m in sender.sent]
+           == ["claim_job", "submit_answer"], "в цепочку ушли оба сообщения")
+        ok(seen == [(2, "claimed", ME, now)],
+           "ответ считается по ПЕРЕЧИТАННОМУ заданию и свежему времени")
+        ok(r["fatal"] is None, "отказа нет")
+
+        r, sender, seen = run({"who": HIM})
+        ok([s["do"] for s in r["sent"]] == ["claim_job"] and not seen,
+           "в цепочке исполнитель другой — не отвечаем, инференса нет")
+
+        r, sender, seen = run({"fail_answer":
+                               "account sequence mismatch, expected 7"})
+        ok([s["do"] for s in r["sent"]] == ["claim_job"]
+           and r["fatal"] is None,
+           "сбой отправки ответа — повтор в следующем цикле, не поломка")
+
+        r, sender, seen = run({"fail_answer":
+                               "исполнитель не допущен к заданиям"})
+        ok(r["fatal"] is not None,
+           "неразобранный отказ на ответе доходит до main")
+    finally:
+        restore()
+        chain.chain_time = real_time
+
+
 def main():
     test_otsutstvie_protiv_nedostupnosti()
     test_obhod_i_otmetka()
@@ -778,6 +857,7 @@ def main():
     test_obyavlenie_adresa()
     test_otmetka_po_granice()
     test_tsikl_cherez_podstavnuyu_tsepochku()
+    test_otvet_v_tom_zhe_tsikle()
     print()
     if fails:
         print(f"ПРОВАЛ, {len(fails)}:")

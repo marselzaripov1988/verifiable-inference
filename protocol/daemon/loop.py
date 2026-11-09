@@ -457,6 +457,51 @@ class Loop:
 
     # --- действия ---------------------------------------------------------
 
+    def answer_claimed(self, job_id, params, me, record=None):
+        """Ответить на только что взятое задание, не дожидаясь цикла.
+
+        Возвращает (запись об отправке или None, текст отказа или None).
+
+        Задание перечитывается из цепочки: верить своему же `claim_job`
+        на слово нельзя — `send` дождался блока, но исполнитель в задании
+        мог оказаться другим, а без свежего `claimed_at` и времени цепочки
+        неверно считается запас срока. Любая неудача здесь — не поломка:
+        задание взято, и следующий цикл ответит на него обычным путём,
+        переиспользуя связку, если она успела собраться.
+        """
+        try:
+            job = chain.job_or_none(self.rest, self.contract, job_id)
+            now = chain.chain_time(self.rest)
+        except chain.ChainUnavailable as e:
+            self.say(f"  {job_id}: взятое не перечитано ({e}) — ответ в "
+                     f"следующем цикле")
+            return None, None
+        if (job is None or state_of(job) != "claimed"
+                or job.get("executor") != me):
+            self.say(f"  {job_id}: взятие в цепочке не видно — ответ в "
+                     f"следующем цикле")
+            return None, None
+        bad = executor.deadline_problems(job, params, now, self.min_left)
+        if bad:
+            self.say(f"  {job_id}: пропуск — {bad[0]}")
+            return None, None
+        self.say(f"  {job_id}: answer — взято в этом цикле")
+        msg = self.do_answer(job_id, job, params, now, record)
+        if msg is None:
+            return None, None
+        try:
+            res = self.sender.send(msg)
+        except tx.TxFailed as e:
+            kind = tx.classify(str(e))
+            line = str(e).splitlines()[0][:200]
+            if kind in ("race", "retry"):
+                self.say(f"    ответ не ушёл, повтор в следующем цикле: "
+                         f"{line}")
+                return None, None
+            self.say(f"    ОТКАЗ, не разобран: {line}")
+            return None, str(e)
+        return {"do": "answer", "job_id": job_id, "res": res}, None
+
     def do_answer(self, job_id, job, params, now, record=None):
         """Породить ответ и собрать `submit_answer`.
 
@@ -637,6 +682,17 @@ class Loop:
             try:
                 res = self.sender.send(msg)
                 sent.append({"do": a["do"], "job_id": job_id, "res": res})
+                if a["do"] == "claim_job" and "executor" in roles:
+                    # Ответ в том же цикле, а не в следующем. Прежде
+                    # взятое ждало целый цикл (15 с) ради одного чтения
+                    # цепочки — при 7 с на самой карте это половина
+                    # времени задания.
+                    extra, fatal = self.answer_claimed(job_id, params, me,
+                                                       record)
+                    if extra is not None:
+                        sent.append(extra)
+                    if fatal:
+                        break
             except tx.TxFailed as e:
                 kind = tx.classify(str(e))
                 if kind == "race":
@@ -701,7 +757,7 @@ def main():
                                       "цепочке записан другой, петля объявит "
                                       "этот")
     p.add_argument("--state", help="файл с отметкой просмотра")
-    p.add_argument("--every", type=int, default=30,
+    p.add_argument("--every", type=int, default=5,
                    help="пауза между циклами, секунды")
     p.add_argument("--once", action="store_true", help="один цикл и выход")
     p.add_argument("--max-tokens", type=int, default=200)
