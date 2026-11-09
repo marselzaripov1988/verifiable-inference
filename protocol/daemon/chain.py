@@ -423,6 +423,23 @@ PHASE_DEADLINE = {
 }
 
 
+def gas_denom(gas_prices):
+    """Монета газа из `--gas-prices`: `0.0025uaxm` → `uaxm`. Нет — None."""
+    m = re.search(r"[a-zA-Z][a-zA-Z0-9/:._-]*$", str(gas_prices or ""))
+    return m.group(0) if m else None
+
+
+def balance(rest, address, denom, timeout=20):
+    """Остаток адреса в монете `denom`, целым числом единиц."""
+    url = (f"{rest.rstrip('/')}/cosmos/bank/v1beta1/balances/{address}"
+           f"/by_denom?denom={denom}")
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as r:
+            return int(json.loads(r.read())["balance"]["amount"])
+    except Exception as e:
+        raise ChainUnavailable(f"{url}: {e}") from e
+
+
 def chain_time(rest, timeout=20):
     """Время ЦЕПОЧКИ в секундах, а не местные часы.
 

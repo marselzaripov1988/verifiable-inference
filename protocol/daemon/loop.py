@@ -339,7 +339,8 @@ class Loop:
                  dtype="bfloat16", roles=("executor", "checker"),
                  bundles=None, prompts=(), peers=(), state_path=None,
                  min_left=0, max_checks=1, max_scan=200, max_tokens=200,
-                 skip_expired=False, endpoint=None, out=None):
+                 skip_expired=False, endpoint=None, out=None,
+                 gas_denom=None, min_gas=0, gas_every=600, clock=time.time):
         self.rest = rest
         self.contract = contract
         self.sender = sender
@@ -363,6 +364,40 @@ class Loop:
         #: цикл, а не навсегда: адрес меняется, и узел, переехавший между
         #: циклами, иначе остался бы недостижимым до перезапуска.
         self.endpoints = {}
+        #: Газ. Расчёт может идти в BARTR, а газ — всегда в монете сети:
+        #: узел зарабатывает одно, а тратит другое, и кончившийся газ
+        #: останавливает его молча — каждая сделка падает с «insufficient
+        #: funds». Поэтому остаток проверяется раз за цикл.
+        self.gas_denom, self.min_gas = gas_denom, int(min_gas or 0)
+        self.gas_every, self.clock = gas_every, clock
+        self.gas_low, self.gas_warned = False, 0
+
+    def check_gas(self, me):
+        """Предупредить, если на газ осталось меньше `min_gas`.
+
+        Возвращает остаток или None, если проверить не вышло. Только
+        предупреждение: остановить узел на остатке — значит бросить уже
+        взятые задания, а пока газ есть, сделки проходят. Не чаще раза в
+        `gas_every` секунд, иначе при цикле в 5 с журнал состоит из одной
+        этой строки.
+        """
+        if not self.gas_denom or self.min_gas <= 0:
+            return None
+        try:
+            have = chain.balance(self.rest, me, self.gas_denom)
+        except chain.ChainUnavailable:
+            return None
+        if have < self.min_gas:
+            if not self.gas_low or self.clock() - self.gas_warned >= self.gas_every:
+                self.say(f"ВНИМАНИЕ: на газ осталось {have} {self.gas_denom} "
+                         f"при пороге {self.min_gas} — пополните {me}, иначе "
+                         f"сделки начнут падать и узел встанет")
+                self.gas_warned = self.clock()
+            self.gas_low = True
+        elif self.gas_low:
+            self.say(f"газ пополнен: {have} {self.gas_denom}")
+            self.gas_low = False
+        return have
 
     def say(self, s):
         print(s, file=self.out)
@@ -597,6 +632,7 @@ class Loop:
         params = chain.load_params(self.rest, self.contract)
         now = chain.chain_time(self.rest)
         me = self.sender.address()
+        self.check_gas(me)
         record = chain.load_executor(self.rest, self.contract, me)
         self.endpoints = {}
         fresh = self.announce_endpoint(record)
@@ -758,6 +794,10 @@ def main():
                                       "цепочке записан другой, петля объявит "
                                       "этот")
     p.add_argument("--state", help="файл с отметкой просмотра")
+    p.add_argument("--min-gas", type=int, default=100000, metavar="ЕДИНИЦ",
+                   help="порог остатка на газ в монете из --gas-prices; ниже — "
+                        "предупреждение. 100000 uaxm = 0,1 AXM, это сотни "
+                        "сделок. 0 — не проверять")
     p.add_argument("--sign-key", metavar="ФАЙЛ",
                    help="ключ (64 hex) для подписи запросов вопроса и связок. "
                         "Без него бот и узлы ответят 401: тексты отдаются "
@@ -839,7 +879,8 @@ def main():
                 prompts=a.prompts, peers=a.peers, state_path=a.state,
                 min_left=a.min_time_left, max_checks=a.max_checks,
                 max_scan=a.max_scan, max_tokens=a.max_tokens,
-                skip_expired=a.skip_expired, endpoint=a.endpoint)
+                skip_expired=a.skip_expired, endpoint=a.endpoint,
+                gas_denom=chain.gas_denom(a.gas_prices), min_gas=a.min_gas)
     print(f"узел {me}, роли {'+'.join(roles)}", file=sys.stderr)
 
     # Подряд неразобранных отказов. Один такой не должен убивать узел:

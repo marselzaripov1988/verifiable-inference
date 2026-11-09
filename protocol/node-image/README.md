@@ -115,7 +115,7 @@ docker run -d --gpus all --name node \
 
 Прочее переопределяется при надобности: `REST`, `RPC`, `CHAIN_ID`,
 `GAS_PRICES` (по умолчанию `0.0025uaxm` — цепочка принимает), `MODEL`,
-`MAX_TOKENS`, `EVERY`, `MIN_LEFT`.
+`MAX_TOKENS`, `EVERY`, `MIN_LEFT`, `MIN_GAS` (порог остатка на газ, по умолчанию 100000 uaxm).
 
 ## Признаки, по которым видно, что всё хорошо
 

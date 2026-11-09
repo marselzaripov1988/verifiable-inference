@@ -846,6 +846,46 @@ def test_otvet_v_tom_zhe_tsikle():
         chain.chain_time = real_time
 
 
+def test_gaz():
+    print("\n### газ: предупреждение, а не молчаливая остановка")
+    ok(chain.gas_denom("0.0025uaxm") == "uaxm" and chain.gas_denom("0stake")
+       == "stake" and chain.gas_denom("") is None, "монета газа из --gas-prices")
+    real = chain.balance
+    have = [50]
+    chain.balance = lambda rest, addr, denom, timeout=20: have[0]
+    clock = [1000.0]
+    try:
+        import io as _io
+        out = _io.StringIO()
+        sender = tx.DryRun(out=open(os.devnull, "w"))
+        sender.address = lambda: ME
+        lp = loop.Loop("http://rest", "axm1c", sender, "http://vllm/v1",
+                       CFG["pinned_model"], out=out, gas_denom="uaxm",
+                       min_gas=100, gas_every=600, clock=lambda: clock[0])
+        ok(lp.check_gas(ME) == 50 and "ВНИМАНИЕ: на газ осталось 50" in
+           out.getvalue(), "ниже порога — предупреждение с остатком")
+        n = out.getvalue().count("ВНИМАНИЕ")
+        clock[0] += 5
+        lp.check_gas(ME)
+        ok(out.getvalue().count("ВНИМАНИЕ") == n,
+           "через цикл не повторяется — журнал не забит")
+        clock[0] += 600
+        lp.check_gas(ME)
+        ok(out.getvalue().count("ВНИМАНИЕ") == n + 1, "через 10 минут — снова")
+        have[0] = 500
+        lp.check_gas(ME)
+        ok("газ пополнен: 500" in out.getvalue(), "пополнение замечено")
+        def down(*a, **k):
+            raise chain.ChainUnavailable("нет")
+        chain.balance = down
+        ok(lp.check_gas(ME) is None, "цепочка молчит — проверка не роняет цикл")
+        off = loop.Loop("http://rest", "axm1c", sender, "http://vllm/v1",
+                        CFG["pinned_model"], out=out)
+        ok(off.check_gas(ME) is None, "без порога не проверяется")
+    finally:
+        chain.balance = real
+
+
 def main():
     test_otsutstvie_protiv_nedostupnosti()
     test_obhod_i_otmetka()
@@ -858,6 +898,7 @@ def main():
     test_otmetka_po_granice()
     test_tsikl_cherez_podstavnuyu_tsepochku()
     test_otvet_v_tom_zhe_tsikle()
+    test_gaz()
     print()
     if fails:
         print(f"ПРОВАЛ, {len(fails)}:")

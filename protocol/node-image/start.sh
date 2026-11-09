@@ -19,6 +19,7 @@ MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
 DTYPE=${DTYPE:-bfloat16}
 MAX_TOKENS=${MAX_TOKENS:-200}
 EVERY=${EVERY:-5}
+MIN_GAS=${MIN_GAS:-100000}
 MIN_LEFT=${MIN_LEFT:-120}
 DAEMON=/opt/node/daemon
 BUNDLES=$NODE_HOME/bundles
@@ -168,4 +169,5 @@ exec python3 -u loop.py \
     --endpoint "$ENDPOINT" \
     --prompts "$PROMPTS" --bundles "$BUNDLES" \
     --state "$NODE_HOME/loop-state.json" --sign-key "$NODE_HOME/sign.key" \
-    --every "$EVERY" --max-tokens "$MAX_TOKENS" --min-time-left "$MIN_LEFT"
+    --every "$EVERY" --max-tokens "$MAX_TOKENS" --min-time-left "$MIN_LEFT" \
+    --min-gas "$MIN_GAS"
