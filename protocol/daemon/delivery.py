@@ -24,14 +24,36 @@ import os
 import urllib.request
 
 import chain
+import sign
+
+#: Ключ, которым подписываются запросы по http(s). Раздающая сторона
+#: отдаёт текст только участникам задания (см. sign.py), поэтому без
+#: подписи узел и заказчик получили бы 401. Задаётся `set_sign_key` либо
+#: файлом из VI_SIGN_KEY_FILE — так подписывает и `client.py`.
+_SIGN_KEY = None
+
+
+def set_sign_key(priv):
+    global _SIGN_KEY
+    _SIGN_KEY = priv
+
+
+def _sign_key():
+    global _SIGN_KEY
+    if _SIGN_KEY is None and os.environ.get("VI_SIGN_KEY_FILE"):
+        _SIGN_KEY = sign.load_key(os.environ["VI_SIGN_KEY_FILE"])
+    return _SIGN_KEY
 
 
 def read_source(src, name, timeout=30):
     """Один источник: каталог на диске либо http(s)-адрес."""
     if src.startswith(("http://", "https://")):
         url = f"{src.rstrip('/')}/{name}"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "verifiable-inference/0.1"})
+        headers = {"User-Agent": "verifiable-inference/0.1"}
+        key = _sign_key()
+        if key is not None:
+            headers.update(sign.headers_for(key, url))
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8")
     with open(os.path.join(src, name), encoding="utf-8") as f:

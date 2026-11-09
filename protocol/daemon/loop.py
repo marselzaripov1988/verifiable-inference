@@ -71,6 +71,7 @@ import chain
 import checker
 import delivery
 import executor
+import sign
 import tx
 
 
@@ -757,6 +758,10 @@ def main():
                                       "цепочке записан другой, петля объявит "
                                       "этот")
     p.add_argument("--state", help="файл с отметкой просмотра")
+    p.add_argument("--sign-key", metavar="ФАЙЛ",
+                   help="ключ (64 hex) для подписи запросов вопроса и связок. "
+                        "Без него бот и узлы ответят 401: тексты отдаются "
+                        "только участникам задания")
     p.add_argument("--every", type=int, default=5,
                    help="пауза между циклами, секунды")
     p.add_argument("--once", action="store_true", help="один цикл и выход")
@@ -774,6 +779,16 @@ def main():
     a = p.parse_args()
 
     roles = ("executor", "checker") if a.role == "both" else (a.role,)
+
+    if a.sign_key:
+        try:
+            delivery.set_sign_key(sign.load_key(a.sign_key))
+        except (OSError, ValueError) as e:
+            print(f"ОТКАЗ: ключ подписи не прочитан: {e}", file=sys.stderr)
+            return 2
+    else:
+        print("ВНИМАНИЕ: --sign-key не задан: запросы не подписываются, и "
+              "раздающие с проверкой допуска откажут", file=sys.stderr)
 
     if a.send:
         if not a.key:

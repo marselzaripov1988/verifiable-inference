@@ -136,12 +136,21 @@ say "6. ключ"
 axmd keys delete node --keyring-backend test -y >/dev/null 2>&1 || true
 err=$(axmd keys import-hex node "$KEY_HEX" --keyring-backend test 2>&1) \
     || fail "ключ в связку не внесён: $err"
+# Тот же ключ подписывает запросы вопроса и связок: тексты отдаются
+# только участникам задания (daemon/sign.py). Лежит рядом со связкой
+# axmd, в которой он и так хранится без пароля, — нового риска нет.
+( umask 077; printf %s "$KEY_HEX" > "$NODE_HOME/sign.key" )
 KEY_HEX=
 ME=$(axmd keys show node -a --keyring-backend test) || fail "адрес из ключа не получен"
 ok "рабочий адрес $ME"
 
 say "7. раздача связок"
-( cd "$BUNDLES" && setsid nohup python3 -m http.server "$BUNDLE_PORT" > "$NODE_HOME/http.log" 2>&1 < /dev/null & )
+# Не `python3 -m http.server`: тот отдавал связку (вопрос и ответ) любому
+# и навсегда. serve_bundles.py пускает только участников задания и стирает
+# связки закрытых заданий через сутки.
+( cd "$BUNDLES" && setsid nohup python3 "$DAEMON/serve_bundles.py" \
+    --dir "$BUNDLES" --port "$BUNDLE_PORT" --rest "$REST" --contract "$CONTRACT" \
+    > "$NODE_HOME/http.log" 2>&1 < /dev/null & )
 sleep 2
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$BUNDLE_PORT/")
 [ "$code" = "200" ] || fail "раздача связок не поднялась (ответ $code)"
@@ -158,5 +167,5 @@ exec python3 -u loop.py \
     --gas-prices "$GAS_PRICES" \
     --endpoint "$ENDPOINT" \
     --prompts "$PROMPTS" --bundles "$BUNDLES" \
-    --state "$NODE_HOME/loop-state.json" \
+    --state "$NODE_HOME/loop-state.json" --sign-key "$NODE_HOME/sign.key" \
     --every "$EVERY" --max-tokens "$MAX_TOKENS" --min-time-left "$MIN_LEFT"
