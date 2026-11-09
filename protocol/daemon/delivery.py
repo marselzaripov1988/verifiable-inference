@@ -55,7 +55,14 @@ def read_source(src, name, timeout=30):
             headers.update(sign.headers_for(key, url))
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.read().decode("utf-8")
+            data = r.read()
+            if r.headers.get(sign.H_SEALED) == "1":
+                # Шифр ключом подписи: вскрыть может только тот, кто
+                # спросил. Метка не сошлась — это подмена, а не текст.
+                if key is None:
+                    raise sign.SealError("ответ зашифрован, а ключа нет")
+                data = sign.open_sealed(key, data)
+            return data.decode("utf-8")
     with open(os.path.join(src, name), encoding="utf-8") as f:
         return f.read()
 

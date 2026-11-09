@@ -146,6 +146,47 @@ def test_request():
         ok(True, "чужой ключ под нашей подписью отвергается")
 
 
+def test_seal():
+    print("\n### шифрование ответа")
+    priv, other = os.urandom(32), os.urandom(32)
+    pub = sign.pubkey(priv)
+    for n in (0, 1, 31, 32, 33, 1000, 70_000):
+        m = os.urandom(n)
+        if sign.open_sealed(priv, sign.seal(pub, m)) != m:
+            ok(False, f"вскрывается своим ключом, длина {n}")
+            break
+    else:
+        ok(True, "вскрывается своим ключом на длинах 0…70 000")
+    text = "тайный вопрос".encode()
+    a, b = sign.seal(pub, text), sign.seal(pub, text)
+    ok(a != b, "разовый ключ: один текст — разные шифры")
+    ok(text not in a, "открытого текста в шифре нет")
+    for name, blob, key in (
+            ("чужим ключом", a, other),
+            ("с подменённым байтом", a[:40] + bytes([a[40] ^ 1]) + a[41:], priv),
+            ("с подменённой меткой", a[:-1] + bytes([a[-1] ^ 1]), priv),
+            ("обрезанный", a[:20], priv),
+            ("не шифр", b"{}", priv)):
+        try:
+            sign.open_sealed(key, blob)
+            ok(False, f"{name} не вскрывается")
+        except sign.SealError:
+            ok(True, f"{name} не вскрывается")
+    # Соответствие схеме, а не только самой себе: общий секрет обязан
+    # совпасть с ECDH из cryptography.
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+    except ImportError:
+        print("  (cryptography нет — сверка ECDH пропущена)")
+        return
+    e = os.urandom(32)
+    mine = sign._mul(int.from_bytes(e, "big"), sign._decompress(pub))[0]
+    k1 = ec.derive_private_key(int.from_bytes(e, "big"), ec.SECP256K1())
+    k2 = ec.derive_private_key(int.from_bytes(priv, "big"), ec.SECP256K1())
+    ok(k1.exchange(ec.ECDH(), k2.public_key()) == mine.to_bytes(32, "big"),
+       "общий секрет совпадает с ECDH cryptography")
+
+
 class FakeChain:
     def __init__(self, executors):
         self.executors = executors
@@ -238,6 +279,21 @@ def test_bundle_server():
         ok(get("5.json", ch_key) == 200, "действующему узлу на проверке — да")
         ok(get("../5.json", cl_key) == 404 and get("x.json", cl_key) == 404,
            "чужие имена не отдаются")
+        url = f"{base}/5.json"
+        r = urllib.request.urlopen(urllib.request.Request(
+            url, headers=sign.headers_for(cl_key, url, now=now[0])))
+        raw_body = r.read()
+        ok(r.headers.get(sign.H_SEALED) == "1"
+           and "тайна".encode() not in raw_body,
+           "по проводу идёт шифр, а не текст")
+        ok(b"\xd1\x82\xd0\xb0\xd0\xb9" not in raw_body
+           and "тайна" in sign.open_sealed(cl_key, raw_body).decode(),
+           "вскрывает его ключ спросившего")
+        try:
+            sign.open_sealed(ch_key, raw_body)
+            ok(False, "другой узел этот шифр не вскроет")
+        except sign.SealError:
+            ok(True, "другой узел этот шифр не вскроет")
 
         delivery.set_sign_key(cl_key)
         real_time = sign.time.time
@@ -268,6 +324,7 @@ def main():
     test_curve()
     test_address()
     test_request()
+    test_seal()
     test_access()
     print("\nподпись и допуск ведут себя как задумано" if not fails
           else f"\nПРОВАЛОВ: {len(fails)}")

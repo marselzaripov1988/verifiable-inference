@@ -314,8 +314,17 @@ def serve_prompts(directory, port, allowed=None, auth=None):
                     return
             with open(p, "rb") as f:
                 body = f.read()
+            key = self.headers.get(sign.H_KEY)
+            sealed = auth is not None and bool(key)
+            if sealed:
+                # Подпись уже проверена в auth: ключ — того, кто спросил.
+                body = sign.seal(bytes.fromhex(key), body)
             self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            if sealed:
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header(sign.H_SEALED, "1")
+            else:
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

@@ -19,11 +19,12 @@
 работает через authz: допуск есть, если холодный адрес выдал ему право
 на этот реестр.
 
-Чего подпись НЕ даёт. Это допуск, а не шифрование: по обычному HTTP текст
-по-прежнему виден тому, кто видит трафик, и он же может повторить
-перехваченный запрос в пределах `SKEW` секунд — получив то, что и так
-видел. От этого спасает только HTTPS. И узел задания видит текст всегда:
-он его считает.
+Ответ на подписанный запрос шифруется ключом спрашивающего (`seal`):
+по обычному HTTP его не прочтёт ни тот, кто видит трафик, ни тот, кто
+перехватил и повторил запрос, — шифр выйдет для чужого ключа. Видно
+остаётся только, кто к кому обращался, и путь, то есть хэш вопроса или
+номер задания: они и так лежат в цепочке. Узел задания видит текст
+всегда: он его считает.
 
 Криптография своя, на стандартной библиотеке: в образе узла и на сервере
 бота не должно быть зависимостей сверх Python. Сверено с `cryptography`
@@ -33,6 +34,7 @@
 import hashlib
 import hmac
 import json
+import os
 import time
 import urllib.error
 import urllib.parse
@@ -296,6 +298,89 @@ def requester(headers, path, now=None):
     if not verify_digest(pub, _digest(path, t), sig):
         raise BadSignature("подпись не сходится")
     return address(pub)
+
+
+# --- шифрование ответа ----------------------------------------------------
+#
+# Ответ шифруется открытым ключом спрашивающего — тем, которым подписан
+# запрос. Подменить ключ нельзя, не сломав подпись, поэтому прочитать
+# ответ может только тот, кто спросил: ни тот, кто видит трафик, ни тот,
+# кто перехватил и повторил запрос (он получит шифр для чужого ключа).
+#
+# Схема ECIES на стандартной библиотеке, без AES: в Python его нет.
+#   e — разовый ключ, E = e·G;  s = x(e·Q), Q — ключ получателя;
+#   k_enc ‖ k_mac = HKDF-SHA256(s, соль E ‖ Q, SEAL_INFO), по 32 байта;
+#   поток = HMAC(k_enc, 0) ‖ HMAC(k_enc, 1) ‖ …, шифр = текст ⊕ поток;
+#   метка = HMAC(k_mac, E ‖ шифр).
+# Итог: MAGIC ‖ E (33) ‖ шифр ‖ метка (32). Ключ разовый на каждый ответ,
+# поэтому поток не повторяется; сначала метка, потом расшифровка.
+
+SEAL_MAGIC = b"VIS1"
+SEAL_INFO = b"verifiable-inference/seal/1"
+H_SEALED = "X-VI-Sealed"
+
+
+class SealError(Exception):
+    """Шифр не вскрылся: не тот ключ, порча или подмена."""
+
+
+def _hkdf(ikm, salt, info, n=64):
+    prk = hmac.new(salt, ikm, hashlib.sha256).digest()
+    out, t, i = b"", b"", 1
+    while len(out) < n:
+        t = hmac.new(prk, t + info + bytes([i]), hashlib.sha256).digest()
+        out += t
+        i += 1
+    return out[:n]
+
+
+def _stream(key, data):
+    out = bytearray(len(data))
+    for i in range(0, len(data), 32):
+        block = hmac.new(key, (i // 32).to_bytes(8, "big"),
+                         hashlib.sha256).digest()
+        chunk = data[i:i + 32]
+        out[i:i + len(chunk)] = bytes(a ^ b for a, b in zip(chunk, block))
+    return bytes(out)
+
+
+def _keys(shared_pt, eph_pub, recv_pub):
+    k = _hkdf(shared_pt[0].to_bytes(32, "big"), eph_pub + recv_pub,
+              SEAL_INFO)
+    return k[:32], k[32:]
+
+
+def seal(recv_pub: bytes, data: bytes, _eph=None) -> bytes:
+    """Зашифровать `data` для владельца ключа `recv_pub` (33 байта)."""
+    q = _decompress(recv_pub)
+    while True:
+        e = _eph or os.urandom(32)
+        d = int.from_bytes(e, "big")
+        if 0 < d < N:
+            break
+    eph_pub = pubkey(e)
+    k_enc, k_mac = _keys(_mul(d, q), eph_pub, recv_pub)
+    ct = _stream(k_enc, data)
+    tag = hmac.new(k_mac, eph_pub + ct, hashlib.sha256).digest()
+    return SEAL_MAGIC + eph_pub + ct + tag
+
+
+def open_sealed(priv: bytes, blob: bytes) -> bytes:
+    """Вскрыть шифр своим ключом. Чужой ключ или порча — SealError."""
+    if len(blob) < 4 + 33 + 32 or not blob.startswith(SEAL_MAGIC):
+        raise SealError("это не шифр")
+    eph_pub, ct, tag = blob[4:37], blob[37:-32], blob[-32:]
+    try:
+        e = _decompress(eph_pub)
+    except ValueError as err:
+        raise SealError(f"разовый ключ негоден: {err}")
+    recv_pub = pubkey(priv)
+    k_enc, k_mac = _keys(_mul(int.from_bytes(priv, "big"), e), eph_pub,
+                         recv_pub)
+    want = hmac.new(k_mac, eph_pub + ct, hashlib.sha256).digest()
+    if not hmac.compare_digest(want, tag):
+        raise SealError("метка не сходится: не тот ключ или текст испорчен")
+    return _stream(k_enc, ct)
 
 
 # --- кто вправе -----------------------------------------------------------

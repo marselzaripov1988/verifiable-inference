@@ -403,6 +403,14 @@ def test_signed_prompt(tmp):
     ok(get(out_key) == 403, "посторонний с подписью — отказ")
     ok(get(ch_key) == 403, "другой узел, пока ответ не сдан, — отказ")
     ok(get(ex_key) == 200, "исполнитель задания получает вопрос")
+    r = urllib.request.urlopen(urllib.request.Request(
+        url, headers=sign.headers_for(ex_key, url, now=b.now())))
+    body = r.read()
+    ok(r.headers.get(sign.H_SEALED) == "1"
+       and "тайный".encode() not in body,
+       "вопрос идёт по проводу шифром")
+    ok("тайный вопрос" in sign.open_sealed(ex_key, body).decode(),
+       "исполнитель вскрывает его своим ключом")
     b.chain.jobs[7] = {"state": "answered", "executor": ex}
     b.access.cache.clear()
     ok(get(ch_key) == 200, "ответ сдан — проверяющий получает вопрос")

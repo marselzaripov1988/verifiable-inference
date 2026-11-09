@@ -48,11 +48,13 @@ def make_handler(directory, access, retain, now=time.time,
     directory = os.path.abspath(directory)
 
     class H(http.server.BaseHTTPRequestHandler):
-        def _send(self, code, body=b""):
+        def _send(self, code, body=b"", sealed=False):
             self.send_response(code)
             self.send_header("Content-Type",
-                             "application/json" if code == 200 and body
+                             "application/octet-stream" if sealed
                              else "text/plain; charset=utf-8")
+            if sealed:
+                self.send_header(sign.H_SEALED, "1")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -93,7 +95,11 @@ def make_handler(directory, access, retain, now=time.time,
                 self.send_error(403, "not a job participant")
                 return
             with open(p, "rb") as f:
-                self._send(200, f.read())
+                body = f.read()
+            # Ключ из запроса уже проверен подписью: шифр — для того, кто
+            # спросил, и ни для кого больше.
+            self._send(200, sign.seal(bytes.fromhex(self.headers[sign.H_KEY]),
+                                      body), sealed=True)
 
         def log_message(self, *a):
             pass
