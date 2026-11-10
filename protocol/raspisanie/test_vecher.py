@@ -114,6 +114,14 @@ class State(unittest.TestCase):
             vecher.HOME = old
 
 
+class ConfScript(unittest.TestCase):
+    def test_formats(self):
+        sh = vecher.CONF_SH.format(contract="axm1p", rpc="https://r")
+        self.assertIn("C=axm1p;", sh)
+        self.assertIn('{"config":{}}', sh)
+        self.assertIn("ref_version", sh)
+
+
 class StakeScript(unittest.TestCase):
     def test_formats(self):
         sh = vecher.STAKE_SH.format(contract="axm1t", bartr="axm1b", rpc="https://r", amount=300000)

@@ -34,9 +34,14 @@ GET {REST}/cosmwasm/wasm/v1/contract/{CONTRACT}/smart/{base64(JSON запрос�
 - `GET {REST}/cosmos/base/tendermint/v1beta1/blocks/latest` — время
   цепочки, от него считаются сроки.
 
-Тестовый реестр для 4090:
-`CONTRACT = axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm`.
-Боевые — в [../УЗЕЛ.md](../УЗЕЛ.md).
+Боевой реестр для 4090, на нём бот с 10 ноября:
+`CONTRACT = axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r`
+(залог узла 1 000 BARTR, одна проверка на ответ, доля проверяющих 4,85%;
+наши узлы работают ежедневно 19:00–21:00 МСК).
+
+Тестовый, тот же контракт с залогом 0,3 BARTR:
+`axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm`.
+Реестры 3090 и 5090 — в [../УЗЕЛ.md](../УЗЕЛ.md).
 
 ## 2. Цепочка, запись (RPC)
 

@@ -1,7 +1,7 @@
 {
-  "contract": "axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm",
+  "contract": "axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r",
   "bartr": "axm1uzldhz4dvv7k7gtc7jl5ahlj84eghc52p0r6zhnjca0d20dxcfkshsd8uz",
-  "stake": 300000,
+  "stake": 1000000000,
   "image": "ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:6a0d4c7906e59dd7faac0e7e5e6f06b54653bde045084634262cbb3e504757a5",
   "rest": "https://axm-lcd.trickle.pro",
   "rpc": "https://api-chain.axiomechain.org",

@@ -133,7 +133,7 @@ ufw allow 8080/tcp
 
 ```sh
 TG_TOKEN=123456:ABC…
-CONTRACT=axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm
+CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r
 KEY=bot
 AXMD_HOME=/opt/vi-bot/axmd
 PROMPT_URI=http://203.0.113.5:8080

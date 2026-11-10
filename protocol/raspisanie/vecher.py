@@ -326,10 +326,49 @@ def node_up(conf, node, avoid_machines, tried, results):
             return
         if out.startswith("петля"):
             log(name, "узел работает")
-            results[name] = True
+            results[name] = ensure_conformance(conf, name, ip, p22)
             return
     log(name, "ОТКАЗ: петля не поднялась вовремя, см. /root/node.log на машине")
     results[name] = False
+
+
+#: Сдать пробу, если в цепочке её нет или она к старой версии эталона.
+#: start.sh пробу СЧИТАЕТ (/root/conf.json), но не сдаёт: сдача — сделка,
+#: а при каждом запуске она не нужна. Петля в это время шлёт свои сделки,
+#: отсюда повторы при несовпавшем номере последовательности.
+CONF_SH = r"""set -u
+C={contract}; N="--node {rpc}"
+A=$(axmd keys show node -a --keyring-backend test)
+need() {{ python3 - "$1" "$2" <<'PY'
+import json, sys
+e = json.loads(sys.argv[1])["data"]; c = json.loads(sys.argv[2])["data"]
+p = e.get("conformance") or {{}}
+print("да" if p.get("ref_version") != c["conformance_version"] else "нет")
+PY
+}}
+for i in 1 2 3 4; do
+  E=$(axmd q wasm contract-state smart $C "{{\"executor\":{{\"address\":\"$A\"}}}}" $N -o json)
+  G=$(axmd q wasm contract-state smart $C '{{"config":{{}}}}' $N -o json)
+  [ "$(need "$E" "$G")" = нет ] && {{ echo "проба в цепочке"; exit 0; }}
+  [ -s /root/conf.json ] || {{ echo "ОТКАЗ: нет /root/conf.json"; exit 1; }}
+  out=$(axmd tx wasm execute $C "$(cat /root/conf.json)" --from node --keyring-backend test $N --chain-id axiome-1 --gas auto --gas-adjustment 1.3 --gas-prices 0.0025uaxm -y -o json 2>&1 | grep '^{{')
+  echo "попытка $i: $(echo "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["code"],d["txhash"][:10],d.get("raw_log","")[:120])' 2>/dev/null)"
+  sleep 12
+done
+echo "ОТКАЗ: проба не сдана"; exit 1
+"""
+
+
+def ensure_conformance(conf, name, ip, p22):
+    sh = CONF_SH.format(contract=conf["contract"],
+                        rpc=conf.get("rpc", "https://api-chain.axiomechain.org"))
+    try:
+        code, out = ssh(ip, p22, "bash -s", stdin=sh, timeout=240)
+    except subprocess.TimeoutExpired:
+        log(name, "ОТКАЗ: сдача пробы не ответила")
+        return False
+    log(name, out.splitlines()[-1] if out else f"проба: код {code}")
+    return code == 0
 
 
 def cmd_up(conf):
@@ -342,8 +381,14 @@ def cmd_up(conf):
     for t in threads:
         t.join()
     ok = sum(results.values())
+    try:
+        need = int(smart(conf, {"config": {}})["checks_required"]) + 1
+    except Exception:
+        need = 3
     log("итог", f"работает {ok} из {len(conf['nodes'])}"
-                + ("" if ok >= 3 else " — меньше трёх: ответы не закроются"))
+                + ("" if ok >= need else
+                   f" — меньше {need}: ответы закроются, только если "
+                   f"подключены чужие узлы"))
     return 0 if ok == len(conf["nodes"]) else 1
 
 
