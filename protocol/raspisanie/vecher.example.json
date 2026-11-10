@@ -7,6 +7,7 @@
   "rpc": "https://api-chain.axiomechain.org",
   "vastai": "/opt/vecher/venv/bin/vastai",
   "offer_query": "gpu_name=RTX_4090 num_gpus=1 reliability>0.99 inet_down>2000 direct_port_count>=4 disk_space>=60 rentable=true verified=true",
+  "max_tokens": 2048,
   "max_dph": 0.6,
   "disk": 60,
   "start_wait_min": 6,

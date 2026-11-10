@@ -240,7 +240,7 @@ def launch_cmd(conf, endpoint):
     """Команда запуска на машине. Ключ приходит первой строкой stdin."""
     env = (f"CONTRACT={conf['contract']} ENDPOINT={endpoint} NODE_HOME=/root "
            f"VLLM_PORT=8000 BUNDLE_PORT=8081 PYTHONUNBUFFERED=1 "
-           f"MAX_TOKENS={int(conf.get('max_tokens', 512))}")
+           f"MAX_TOKENS={int(conf.get('max_tokens', 2048))}")
     return ("read -r KEY_HEX; KEY_HEX=$(printf %s \"$KEY_HEX\" | tr -cd 0-9a-fA-F); "
             f"export KEY_HEX {env}; cd /root; "
             "nohup setsid /opt/node/start.sh > /root/node.log 2>&1 < /dev/null & "
