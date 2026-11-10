@@ -466,6 +466,103 @@ def test_signed_prompt(tmp):
     srv.shutdown()
 
 
+def test_pay(tmp):
+    import base64
+    b, clock, _ = make(tmp)
+    b.cfg.price_bartr = 2_000_000
+    incoming = []
+    b.deposits = lambda addr, skip: [d for d in incoming if d[0] not in skip]
+    _, _, total = bot.client.totals(PARAMS, b.cfg.price)
+    q_axm = total + 3000
+
+    # первый проход: старая история кошелька не зачисляется и не шумит
+    incoming.append(("OLD", "", "uaxm", 5_000_000))
+    b.tick_deposits(initial=True)
+    ok(b.api.sent == [], "история кошелька при запуске — без писем")
+
+    b.handle(msg(5, "/pay 3"))
+    t = b.api.sent[-1][1]
+    code = b.store.code(5)
+    ok(code in t and "axm1bot" in t, "/pay: код и адрес бота")
+    link = next(l for l in t.splitlines() if l.startswith("axiomesign://"))
+    body = json.loads(base64.b64decode(link[len("axiomesign://"):]))
+    ok(body["contract_addr"] == bot.BARTR and body["memo"] == code
+       and body["msg"] == {"transfer": {"recipient": "axm1bot",
+                                        "amount": "6000000"}},
+       "ссылка: transfer BARTR на бота на 3 вопроса, код в заметке")
+    ok(b.store.code(5) == code and b.store.code(6) != code,
+       "код у чата постоянный и у каждого свой")
+
+    # лимит 2: третий вопрос без денег не уходит
+    for _ in range(3):
+        b.handle(msg(5, "вопрос"))
+    ok(len(b.sender.sent) == 2 and "/pay" in b.api.sent[-1][1],
+       "без денег сверх лимита — отказ со ссылкой на /pay")
+    b.store.q("UPDATE jobs SET done=1")  # бесплатные дальше не нужны
+
+    incoming.append(("D1", f"за вопросы {code.upper()}", "uaxm", 2 * q_axm))
+    incoming.append(("D2", "без кода", "uaxm", 999))
+    b.cfg.admins = {1}
+    b.tick_deposits()
+    ok(b.store.credit(5) == {"uaxm": 2 * q_axm}, "перевод с кодом зачислен")
+    ok(any(c == 5 and "Пришло" in t for c, t in b.api.sent),
+       "человек знает, что деньги пришли")
+    ok(any(c == 1 and "без кода" in t for c, t in b.api.sent),
+       "перевод без кода — владельцу, не на чей-то счёт")
+    b.tick_deposits()
+    ok(b.store.credit(5) == {"uaxm": 2 * q_axm}, "повторный проход не удваивает")
+
+    b.handle(msg(5, "вопрос три"))
+    ok(len(b.sender.sent) == 3 and b.store.credit(5)["uaxm"] == q_axm,
+       "платный вопрос ушёл, списана цена вопроса")
+    job = b.sender.next - 1
+    b.chain.jobs[job] = {"state": "settled", "guilty": None}
+    b.tick_jobs()
+    ok(b.store.credit(5)["uaxm"] == 2 * q_axm,
+       "без вердикта — оплата вернулась на счёт")
+    b.tick_jobs()
+    ok(b.store.credit(5)["uaxm"] == 2 * q_axm, "и только один раз")
+
+    b.handle(msg(5, "вопрос четыре"))
+    job = b.sender.next - 1
+    b.chain.jobs[job] = {"state": "open"}
+    clock[0] += 901
+    b.tick_jobs()
+    ok(b.store.credit(5)["uaxm"] == 2 * q_axm,
+       "невзятое платное снято — деньги на счёте, а не в лимите")
+
+    b.handle(msg(5, "вопрос пять"))
+    job = b.sender.next - 1
+    b.chain.jobs[job] = {"state": "settled", "guilty": False}
+    b.tick_jobs()
+    ok(b.store.credit(5)["uaxm"] == q_axm, "подтверждённый ответ — оплата списана")
+
+    incoming.append(("D3", code, "bartr", 2_000_000))
+    b.tick_deposits()
+    b.store.charge(5, "uaxm", q_axm)
+    b.handle(msg(5, "вопрос шесть"))
+    ok(b.store.credit(5).get("bartr") == 0, "кончились AXM — платит BARTR")
+
+    f, _, _ = make(tmp, fail=True)
+    f.store.take(7, f.day(), 99)
+    f.store.add_credit(7, "uaxm", q_axm)
+    f.handle(msg(7, "вопрос"))
+    ok(f.store.credit(7)["uaxm"] == q_axm, "сделка не прошла — оплата на месте")
+
+    raw = {"tx_response": {"code": 0}, "tx": {"body": {"memo": "vi-abc234",
+           "messages": [{"@type": "/cosmwasm.wasm.v1.MsgExecuteContract",
+                         "contract": bot.BARTR, "msg": {"transfer": {
+                             "recipient": "axm1bot", "amount": "5"}}},
+                        {"@type": "/cosmos.bank.v1beta1.MsgSend",
+                         "to_address": "axm1other",
+                         "amount": [{"denom": "uaxm", "amount": "7"}]}]}}}
+    ok(bot.parse_deposit(raw, "axm1bot", bot.BARTR) == ("vi-abc234", "bartr", 5),
+       "разбор сделки: только то, что пришло боту")
+    raw["tx_response"]["code"] = 5
+    ok(bot.parse_deposit(raw, "axm1bot", bot.BARTR)[2] == 0,
+       "упавшая сделка не считается")
+
+
 def test_split():
     parts = bot.split_text("строка\n" * 1000, limit=100)
     ok(all(len(p) <= 100 for p in parts) and "".join(parts) == "строка\n" * 1000,
@@ -480,7 +577,7 @@ if __name__ == "__main__":
                   test_answer_unreachable, test_limits, test_hours, test_gpu,
                   test_open_timeout,
                   test_nodes, test_prompt_server, test_privacy,
-                  test_signed_prompt):
+                  test_signed_prompt, test_pay):
             t(tempfile.mkdtemp(dir=tmp))
         test_split()
     finally:

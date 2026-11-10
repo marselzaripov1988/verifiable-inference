@@ -21,13 +21,20 @@
 в сутки и потолок длины вопроса. Без лимита кошелёк опустошит первый же,
 кто напишет скрипт.
 
+**Пополнение.** Сверх бесплатных вопросов человек платит сам: переводит
+AXM или BARTR на кошелёк бота с личным кодом в заметке (`/pay`). Задание
+всё равно ставит бот от своего кошелька: ответ шифруется ключом заказчика,
+и заплати человек в реестр напрямую, бот не смог бы ему ответ показать.
+
 Запуск и настройка — README.md рядом.
 """
 
+import base64
 import http.server
 import json
 import os
 import re
+import secrets
 import sqlite3
 import sys
 import threading
@@ -110,6 +117,11 @@ class Config:
         #: Узлы поднимает расписание (protocol/raspisanie), и вопрос вне
         #: часов никто бы не взял: бот снял бы его через OPEN_TIMEOUT.
         self.hours = parse_hours(env.get("HOURS", ""))
+        #: Сверх цены задания с платного вопроса берётся на газ бота, uaxm.
+        self.pay_gas = int(env.get("PAY_GAS", "3000"))
+        #: Цена вопроса в микро-BARTR. 0 — оплата в BARTR выключена: у BARTR
+        #: нет пула, и курс к AXM задаёт владелец бота.
+        self.price_bartr = int(env.get("PRICE_BARTR", "0"))
 
 
 MSK = 3 * 3600  # Москва — UTC+3 круглый год
@@ -279,12 +291,23 @@ class Store:
             CREATE TABLE IF NOT EXISTS subs(chat INTEGER, address TEXT,
                 last TEXT, down INTEGER DEFAULT 0,
                 PRIMARY KEY(chat, address));
+            CREATE TABLE IF NOT EXISTS codes(chat INTEGER PRIMARY KEY,
+                code TEXT UNIQUE);
+            CREATE TABLE IF NOT EXISTS credit(chat INTEGER, unit TEXT,
+                amount INTEGER, PRIMARY KEY(chat, unit));
+            CREATE TABLE IF NOT EXISTS deposits(hash TEXT PRIMARY KEY,
+                chat INTEGER, unit TEXT, amount INTEGER, at REAL);
             """)
             # Хэш запроса — чтобы знать, какой файл раздавать и какой
             # стереть. Столбец добавлен 9 ноября; старые базы дополняются.
             cols = [r[1] for r in self.db.execute("PRAGMA table_info(jobs)")]
             if "prompt_hash" not in cols:
                 self.db.execute("ALTER TABLE jobs ADD COLUMN prompt_hash TEXT")
+            # Чем оплачен вопрос сверх лимита: вернуть ровно это, если
+            # ответа человек не получил. Добавлено 10 ноября.
+            if "paid_unit" not in cols:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN paid_unit TEXT")
+                self.db.execute("ALTER TABLE jobs ADD COLUMN paid INTEGER")
             self.db.commit()
 
     def q(self, sql, *args):
@@ -313,6 +336,64 @@ class Store:
     def used(self, chat, day):
         r = self.q("SELECT n FROM usage WHERE chat=? AND day=?", chat, day)
         return r[0][0] if r else 0
+
+    # --- пополнение ---
+
+    def code(self, chat):
+        """Личный код для заметки перевода: по нему платёж находит чат."""
+        while True:
+            r = self.q("SELECT code FROM codes WHERE chat=?", chat)
+            if r:
+                return r[0][0]
+            c = "vi-" + "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789")
+                                for _ in range(6))
+            try:
+                self.q("INSERT INTO codes VALUES(?,?)", chat, c)
+            except sqlite3.IntegrityError:
+                pass  # код занят или чат успел получить свой — ещё круг
+
+    def chat_of(self, code):
+        r = self.q("SELECT chat FROM codes WHERE code=?", code)
+        return r[0][0] if r else None
+
+    def credit(self, chat):
+        return {u: a for u, a in self.q(
+            "SELECT unit, amount FROM credit WHERE chat=?", chat)}
+
+    def add_credit(self, chat, unit, amount):
+        with self.lock:
+            self.db.execute("INSERT OR IGNORE INTO credit VALUES(?,?,0)",
+                            (chat, unit))
+            self.db.execute("UPDATE credit SET amount=amount+? WHERE chat=? "
+                            "AND unit=?", (int(amount), chat, unit))
+            self.db.commit()
+
+    def charge(self, chat, unit, amount):
+        """Списать, если хватает. Под замком: два вопроса разом не
+        спишут одни и те же деньги дважды."""
+        with self.lock:
+            row = self.db.execute("SELECT amount FROM credit WHERE chat=? AND "
+                                  "unit=?", (chat, unit)).fetchone()
+            if not row or row[0] < amount:
+                return False
+            self.db.execute("UPDATE credit SET amount=amount-? WHERE chat=? "
+                            "AND unit=?", (int(amount), chat, unit))
+            self.db.commit()
+            return True
+
+    def known_deposits(self):
+        return {r[0] for r in self.q("SELECT hash FROM deposits")}
+
+    def add_deposit(self, h, chat, unit, amount, at):
+        """Записать сделку один раз. False — уже была."""
+        with self.lock:
+            try:
+                self.db.execute("INSERT INTO deposits VALUES(?,?,?,?,?)",
+                                (h, chat, unit, int(amount), at))
+            except sqlite3.IntegrityError:
+                return False
+            self.db.commit()
+            return True
 
 
 # --- раздача запросов -----------------------------------------------------
@@ -385,9 +466,80 @@ def money(amount, unit):
     s = f"{a:,.6f}".rstrip("0").rstrip(".").replace(",", " ")
     if unit == {"native": "uaxm"} or unit == "uaxm":
         return f"{s} AXM"
-    if unit == {"cw20": BARTR}:
+    if unit == {"cw20": BARTR} or unit == "bartr":
         return f"{s} BARTR"
     return f"{amount} {chain.settlement_label(unit)}"
+
+
+CODE = re.compile(r"\bvi-[a-z0-9]{6}\b")
+
+
+def pay_link(chain_id, token, recipient, amount, memo):
+    """Строка Axiome Connect: перевод CW20 на кошелёк бота с кодом в
+    заметке. Тот же формат, что у награды BARTR Distributor."""
+    body = {"type": "cosmwasm_execute", "network": chain_id,
+            "contract_addr": token, "funds": [],
+            "msg": {"transfer": {"recipient": recipient,
+                                 "amount": str(int(amount))}},
+            "memo": memo}
+    raw = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    return "axiomesign://" + base64.b64encode(raw.encode()).decode()
+
+
+def parse_deposit(txj, addr, token):
+    """Сделка с LCD → (заметка, единица, сумма). Считается только то, что
+    пришло на `addr`: перевод AXM или transfer CW20 токена `token`.
+    Возвраты реестра сюда не попадают: это не MsgSend."""
+    resp = txj.get("tx_response") or {}
+    if int(resp.get("code") or 0) != 0:
+        return None, None, 0
+    body = (txj.get("tx") or {}).get("body") or {}
+    memo = body.get("memo") or ""
+    unit, total = None, 0
+    for m in body.get("messages") or []:
+        t = m.get("@type", "")
+        if t.endswith("bank.v1beta1.MsgSend") and m.get("to_address") == addr:
+            for c in m.get("amount") or []:
+                if c.get("denom") == "uaxm":
+                    unit, total = "uaxm", total + int(c.get("amount") or 0)
+        elif t.endswith("wasm.v1.MsgExecuteContract") \
+                and m.get("contract") == token:
+            inner = m.get("msg")
+            if isinstance(inner, str):
+                try:
+                    inner = json.loads(base64.b64decode(inner))
+                except Exception:
+                    inner = {}
+            tr = (inner or {}).get("transfer") or {}
+            if tr.get("recipient") == addr:
+                unit, total = "bartr", total + int(tr.get("amount") or 0)
+    return memo, unit, total
+
+
+def find_deposits(node, rest, addr, token, skip, timeout=20):
+    """Новые входящие сделки кошелька бота: [(хэш, заметка, единица,
+    сумма)]. Поиск по индексу RPC, разбор — по JSON с LCD."""
+    out = []
+    for q in (f"transfer.recipient='{addr}'",
+              f"wasm._contract_address='{token}' AND wasm.to='{addr}'"):
+        url = (f"{node.rstrip('/')}/tx_search?query="
+               f"{urllib.parse.quote(chr(34) + q + chr(34))}"
+               f"&per_page=50&order_by=%22desc%22")
+        req = urllib.request.Request(url, headers={"User-Agent": "vi-bot/1.0"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            txs = json.loads(r.read()).get("result", {}).get("txs") or []
+        for t in txs:
+            h = t.get("hash")
+            if not h or h in skip:
+                continue
+            skip.add(h)
+            with urllib.request.urlopen(
+                    f"{rest.rstrip('/')}/cosmos/tx/v1beta1/txs/{h}",
+                    timeout=timeout) as r:
+                memo, unit, amount = parse_deposit(json.loads(r.read()),
+                                                   addr, token)
+            out.append((h, memo, unit, amount))
+    return out
 
 
 def stage(job, params, checks=None):
@@ -480,6 +632,7 @@ HELP = """Бот проверяемого вывода на Axiome.
 /ask <вопрос> — то же, что просто текст
 /job <номер> — что с заданием
 /limits — сколько вопросов осталось сегодня
+/pay — оплатить вопросы сверх бесплатных
 /hours — часы работы сети
 /registry — настройки реестра
 
@@ -531,12 +684,15 @@ docker run -d --gpus all --name node -p 8081:8081 \\
 class Bot:
     def __init__(self, cfg, api, store, sender, chainmod=chain,
                  fetch=client.fetch_answer, sources=client.answer_sources,
-                 ping=reachable, now=time.time, txs=job_txs):
+                 ping=reachable, now=time.time, txs=job_txs,
+                 deposits=None):
         self.cfg, self.api, self.store = cfg, api, store
         self.sender, self.chain = sender, chainmod
         self.fetch, self.sources, self.ping, self.now = (fetch, sources,
                                                          ping, now)
         self.txs = txs
+        self.deposits = deposits or (lambda addr, skip: find_deposits(
+            cfg.node, cfg.rest, addr, BARTR, skip))
         # Одна сделка за раз: у кошелька один номер последовательности, и
         # две одновременные отправки — отказ одной из них.
         self.tx_lock = threading.Lock()
@@ -611,8 +767,11 @@ class Bot:
                 self.api.send(chat, self.gpu_text())
             elif cmd == "/limits":
                 left = self.cfg.daily - self.store.used(chat, self.day())
-                self.api.send(chat, f"Сегодня осталось вопросов: "
-                                    f"{max(left, 0)} из {self.cfg.daily}.")
+                self.api.send(chat, f"Сегодня осталось бесплатных вопросов: "
+                                    f"{max(left, 0)} из {self.cfg.daily}."
+                                    + self.credit_line(chat))
+            elif cmd == "/pay":
+                self.api.send(chat, self.pay_text(chat, arg))
             elif cmd == "/registry":
                 self.api.send(chat, self.registry_text())
             elif cmd == "/job":
@@ -650,7 +809,8 @@ class Bot:
             f"залог узла: не меньше {money(p.min_stake, p.stake_unit)}",
             f"цена вопроса: {money(total, p.settlement)} "
             f"(узлу {money(price, p.settlement)}, проверяющим "
-            f"{money(fee, p.settlement)}) — платит бот",
+            f"{money(fee, p.settlement)}) — бесплатные платит бот, "
+            f"сверх них /pay",
         ])
 
     def gpu_text(self):
@@ -717,6 +877,113 @@ class Bot:
         return card + ("\n\nПодписка включена: сообщу об изменениях."
                        if rec else "")
 
+    # --- пополнение -------------------------------------------------------
+
+    def prices(self):
+        """Цена платного вопроса: {единица: микро}. AXM — цена задания в
+        реестре плюс газ бота; BARTR — по курсу владельца, если задан."""
+        out = {}
+        p = self.params()
+        if p.settlement == {"native": "uaxm"}:
+            _, _, total = client.totals(p, self.cfg.price)
+            out["uaxm"] = total + getattr(self.cfg, "pay_gas", 3000)
+        if getattr(self.cfg, "price_bartr", 0) > 0:
+            out["bartr"] = self.cfg.price_bartr
+        return out
+
+    def charge(self, chat):
+        """Списать один вопрос: сначала AXM, потом BARTR. None — нечем."""
+        for unit, price in self.prices().items():
+            if self.store.charge(chat, unit, price):
+                return unit, price
+        return None
+
+    def give_back(self, chat, day, unlimited, paid):
+        if paid:
+            self.store.add_credit(chat, *paid)
+        elif not unlimited:
+            self.store.give_back(chat, day)
+
+    def refund(self, job_id):
+        """Ответа человек не получил — вернуть оплату вопроса, если была.
+        Один раз: сумма в строке задания обнуляется."""
+        r = self.store.q("SELECT chat, paid_unit, paid FROM jobs WHERE "
+                         "job_id=?", job_id)
+        if not r or not r[0][1] or not r[0][2]:
+            return None
+        chat, unit, amount = r[0]
+        self.store.q("UPDATE jobs SET paid=0 WHERE job_id=?", job_id)
+        self.store.add_credit(chat, unit, amount)
+        return unit, amount
+
+    def credit_line(self, chat):
+        c = {u: a for u, a in self.store.credit(chat).items() if a > 0}
+        if not c:
+            return "\nОплаченных вопросов нет: /pay"
+        parts, n = [], 0
+        prices = self.prices()
+        for unit, a in c.items():
+            parts.append(money(a, unit))
+            if prices.get(unit):
+                n += a // prices[unit]
+        return (f"\nНа счёте: {', '.join(parts)} — это {n} вопросов "
+                f"сверх лимита.")
+
+    def pay_text(self, chat, arg):
+        prices = self.prices()
+        if not prices:
+            return "Оплата вопросов сейчас не принимается."
+        n = int(arg) if arg.isdigit() and 0 < int(arg) <= 1000 else 10
+        code = self.store.code(chat)
+        addr = self.sender.address()
+        lines = [f"💳 Вопросы сверх бесплатных {self.cfg.daily} в сутки",
+                 "Цена вопроса: " + " или ".join(
+                     money(v, u) for u, v in prices.items()) + ".",
+                 f"Ваш код: {code} — он идёт в заметку (memo) перевода. "
+                 f"Без кода платёж не найдёт ваш чат."]
+        if "bartr" in prices:
+            lines += ["", f"BARTR одной строкой, на {n} вопросов "
+                      f"({money(n * prices['bartr'], 'bartr')}): Axiome "
+                      f"Wallet → Axiome Connect → вставить строку и "
+                      f"подтвердить.",
+                      pay_link(getattr(self.cfg, "chain_id", "axiome-1"),
+                               BARTR, addr, n * prices["bartr"], code)]
+        if "uaxm" in prices:
+            lines += ["", f"AXM — обычным переводом на адрес бота с заметкой "
+                      f"{code}:", addr,
+                      f"на {n} вопросов — {money(n * prices['uaxm'], 'uaxm')}."]
+        lines += ["", "Деньги зачислятся через минуту-две после перевода, "
+                  "я напишу. Если ответ на оплаченный вопрос не пришёл, "
+                  "оплата возвращается на счёт." + self.credit_line(chat)]
+        return "\n".join(lines)
+
+    def tick_deposits(self, initial=False):
+        """Входящие переводы кошелька бота → счёт чата по коду в заметке.
+
+        `initial` — первый проход на базе без единой записи о переводах:
+        всё, что уже лежит в истории кошелька (пополнения владельцем,
+        возвраты реестра), помечается увиденным без зачисления и писем.
+        """
+        addr = self.sender.address()
+        skip = self.store.known_deposits()
+        fresh = initial and not skip
+        for h, memo, unit, amount in self.deposits(addr, skip):
+            m = CODE.search((memo or "").lower())
+            chat = self.store.chat_of(m.group(0)) if m and unit else None
+            if fresh:
+                chat, amount = None, 0
+            if not self.store.add_deposit(h, chat, unit, amount, self.now()):
+                continue
+            if chat is not None and amount > 0:
+                self.store.add_credit(chat, unit, amount)
+                self.api.send(chat, f"✅ Пришло {money(amount, unit)}."
+                                    + self.credit_line(chat))
+            elif unit and amount > 0:
+                for a in self.cfg.admins:
+                    self.api.send(a, f"Пришло {money(amount, unit)} без "
+                                     f"кода в заметке (сделка {h}, заметка "
+                                     f"{(memo or '—')[:60]!r}). Не зачислено.")
+
     # --- вопрос -----------------------------------------------------------
 
     def ask(self, chat, prompt):
@@ -735,22 +1002,27 @@ class Bot:
             # заплатил бы газ за постановку и снятие.
             self.api.send(chat, hours_text(hours, self.now()))
             return
+        paid = None  # (единица, сумма), если вопрос сверх лимита
         if not unlimited and not self.store.take(chat, day, self.cfg.daily):
-            self.api.send(chat, f"На сегодня вопросы кончились "
-                                f"({self.cfg.daily} в сутки). Завтра снова.")
-            return
-        msg = self.api.send(chat, "📨 Ставлю задание в сеть…")
+            paid = self.charge(chat)
+            if paid is None:
+                self.api.send(chat, f"Бесплатные вопросы на сегодня кончились "
+                                    f"({self.cfg.daily} в сутки). Завтра снова "
+                                    f"— или оплатите вопросы: /pay")
+                return
+        msg = self.api.send(chat, "📨 Ставлю задание в сеть…" + (
+            f" (оплачено {money(paid[1], paid[0])})" if paid else ""))
         try:
             job_id, txhash, ph = self.submit(prompt)
         except Exception as e:
-            if not unlimited:
-                self.store.give_back(chat, day)
+            self.give_back(chat, day, unlimited, paid)
             self.api.edit(chat, msg, f"Не удалось поставить задание: "
                                      f"{str(e)[:300]}")
             return
         self.store.q("INSERT INTO jobs(job_id,chat,msg,created,state,"
-                     "prompt_hash) VALUES(?,?,?,?,?,?)", job_id, chat, msg,
-                     self.now(), "open", ph)
+                     "prompt_hash,paid_unit,paid) VALUES(?,?,?,?,?,?,?,?)",
+                     job_id, chat, msg, self.now(), "open", ph,
+                     paid[0] if paid else None, paid[1] if paid else None)
         self.pending.discard(ph)
         self.api.edit(chat, msg, f"Задание {job_id}: ⏳ ждёт исполнителя\n"
                                  f"сделка {txhash}")
@@ -896,6 +1168,10 @@ class Bot:
             text = (f"⚠️ Задание {job_id} закрыто без вердикта: проверки не "
                     f"собрались в срок. Деньги вернулись, ответ не "
                     f"подтверждён — не показываю.")
+        if g is not False:
+            back = self.refund(job_id)
+            if back:
+                text += f" Оплата {money(back[1], back[0])} возвращена на счёт."
         links = self.links(job_id)
         if links:
             text = f"{text}\n\n{links}"
@@ -912,11 +1188,15 @@ class Bot:
             # не open, и следующий цикл увидит его состояние.
             print(f"cancel {job_id}: {e}", file=sys.stderr)
             return
+        back = self.refund(job_id)
         self.api.send(chat, f"Задание {job_id}: за "
                             f"{self.cfg.open_timeout // 60} мин его никто не "
                             f"взял — сейчас в сети нет свободных узлов. "
-                            f"Задание снято, вопрос в лимите возвращён.")
-        self.store.give_back(chat, self.day())
+                            f"Задание снято, "
+                            + (f"{money(back[1], back[0])} возвращены на счёт."
+                               if back else "вопрос в лимите возвращён."))
+        if not back:
+            self.store.give_back(chat, self.day())
         self.store.q("UPDATE jobs SET done=1 WHERE job_id=?", job_id)
         self.forget(job_id)
 
@@ -995,6 +1275,11 @@ def main():
     print(f"запросы раздаются на :{cfg.port}, снаружи {cfg.prompt_uri}",
           file=sys.stderr)
     every(15, bot.tick_jobs)
+    try:
+        bot.tick_deposits(initial=True)
+    except Exception as e:
+        print(f"пополнения: {e}", file=sys.stderr)
+    every(30, bot.tick_deposits)
     every(60, bot.tick_nodes)
     offset = None
     while True:
