@@ -1,0 +1,22 @@
+{
+  "contract": "axm106jyr6sdutlwhpng0q9qclxfn5kz20e3np594fyqx38fyzuw0xfs0mm3fm",
+  "bartr": "axm1uzldhz4dvv7k7gtc7jl5ahlj84eghc52p0r6zhnjca0d20dxcfkshsd8uz",
+  "stake": 300000,
+  "image": "ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:6a0d4c7906e59dd7faac0e7e5e6f06b54653bde045084634262cbb3e504757a5",
+  "rest": "https://axm-lcd.trickle.pro",
+  "rpc": "https://api-chain.axiomechain.org",
+  "vastai": "/opt/vecher/venv/bin/vastai",
+  "offer_query": "gpu_name=RTX_4090 num_gpus=1 reliability>0.99 inet_down>2000 direct_port_count>=4 disk_space>=60 rentable=true verified=true",
+  "max_dph": 0.6,
+  "disk": 60,
+  "start_wait_min": 6,
+  "rent_wait_min": 25,
+  "ready_wait_min": 25,
+  "drain_min": 10,
+  "rent_tries": 3,
+  "nodes": [
+    {"name": "node1", "key": "/opt/vecher/keys/node1.key"},
+    {"name": "node2", "key": "/opt/vecher/keys/node2.key"},
+    {"name": "node3", "key": "/opt/vecher/keys/node3.key"}
+  ]
+}

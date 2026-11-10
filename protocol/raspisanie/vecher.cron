@@ -1,0 +1,14 @@
+# /etc/cron.d/vecher — часы сети 19:00–21:00 по Москве.
+# Сервер в UTC, а cron Ubuntu CRON_TZ не понимает: время пересчитано
+# вручную. Москва — UTC+3 круглый год, перевода часов нет.
+#
+#   15:20 UTC = 18:20 МСК  поднять (образ качается до 15 мин, плюс запуск)
+#   18:00 UTC = 21:00 МСК  дождаться закрытия заданий и остановить
+#   18:30 UTC = 21:30 МСК  страховка: остановить без ожидания
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+VECHER_HOME=/opt/vecher
+
+20 15 * * * root flock -n /run/vecher-up.lock /opt/vecher/vecher.py up >> /var/log/vecher.log 2>&1
+0 18 * * * root flock -w 1500 /run/vecher-down.lock /opt/vecher/vecher.py down >> /var/log/vecher.log 2>&1
+30 18 * * * root flock -w 600 /run/vecher-down.lock /opt/vecher/vecher.py down --no-drain >> /var/log/vecher.log 2>&1
