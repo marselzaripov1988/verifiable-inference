@@ -106,6 +106,46 @@ class Config:
                                                    env.get("ADMINS", ""))}
         self.allowed = {int(x) for x in re.findall(r"-?\d+",
                                                    env.get("ALLOWED", ""))}
+        #: Часы работы сети по Москве, «19-21». Пусто — круглосуточно.
+        #: Узлы поднимает расписание (protocol/raspisanie), и вопрос вне
+        #: часов никто бы не взял: бот снял бы его через OPEN_TIMEOUT.
+        self.hours = parse_hours(env.get("HOURS", ""))
+
+
+MSK = 3 * 3600  # Москва — UTC+3 круглый год
+
+
+def parse_hours(s):
+    """«19-21» → (19, 21). Пусто → None (круглосуточно)."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    m = re.fullmatch(r"(\d{1,2})(?::00)?\s*-\s*(\d{1,2})(?::00)?", s)
+    if not m or not (0 <= int(m[1]) < int(m[2]) <= 24):
+        raise SystemExit(f"HOURS: нужно вроде «19-21», а не {s!r}")
+    return int(m[1]), int(m[2])
+
+
+def is_open(hours, now):
+    if not hours:
+        return True
+    h = time.gmtime(now + MSK).tm_hour
+    return hours[0] <= h < hours[1]
+
+
+def hours_text(hours, now):
+    if not hours:
+        return "Сеть работает круглосуточно."
+    a, b = hours
+    head = (f"🕖 Тестовый режим: сеть работает ежедневно с {a}:00 до {b}:00 "
+            f"по Москве.")
+    if is_open(hours, now):
+        return f"{head}\nСейчас открыто — задавайте вопрос."
+    t = time.gmtime(now + MSK)
+    left = ((a - t.tm_hour) % 24) * 60 - t.tm_min
+    return (f"{head}\nСейчас закрыто, откроется через "
+            f"{left // 60} ч {left % 60} мин. Вне этих часов узлы выключены, "
+            f"и вопрос никто не возьмёт.")
 
 
 # --- Telegram -------------------------------------------------------------
@@ -440,12 +480,50 @@ HELP = """Бот проверяемого вывода на Axiome.
 /ask <вопрос> — то же, что просто текст
 /job <номер> — что с заданием
 /limits — сколько вопросов осталось сегодня
+/hours — часы работы сети
 /registry — настройки реестра
 
-Для владельцев узлов:
+Для владельцев видеокарт:
+/gpu — как подключить свою карту и зарабатывать
 /node <адрес> — запись узла и подписка на изменения
 /unnode <адрес> — отписаться
 /nodes — мои подписки"""
+
+#: Образ узла по digest: тег можно перевесить, digest — нет. Это v3,
+#: проверенная на 4090 9–10 ноября (protocol/УЗЕЛ.md).
+NODE_IMAGE = ("ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:"
+              "6a0d4c7906e59dd7faac0e7e5e6f06b54653bde045084634262cbb3e504757a5")
+GUIDE_URL = ("https://github.com/marselzaripov1988/verifiable-inference/"
+             "blob/main/protocol/%D0%A3%D0%97%D0%95%D0%9B.md")
+
+GPU = """🖥 Как подключить свою видеокарту
+
+Узел отвечает на вопросы и проверяет чужие ответы, за это ему платят из каждого вопроса. Залог держит узел честным: за подменённый ответ он сгорает.
+
+Что нужно:
+• RTX 4090 (24 ГБ). Именно эта модель: у этого реестра класс {arch}, кеш ядер и эталон сняты на ней. Для 3090 и 5090 свои реестры — в инструкции.
+• Linux, Docker и драйвер NVIDIA; один TCP-порт, открытый наружу.
+• Кошелёк Axiome (тип монеты 546, не 118), немного AXM на газ и {stake} на залог.
+
+1. Скачать образ:
+docker pull {image}
+
+2. Записаться в реестр и внести залог — команды axmd в разделах 5 и 8 инструкции. Реестр:
+{contract}
+
+3. Запустить узел:
+docker run -d --gpus all --name node -p 8081:8081 \\
+  -e CONTRACT={contract} \\
+  -e ENDPOINT=http://ВАШ-IP:8081 \\
+  -e KEY_HEX=<ключ рабочего адреса> \\
+  {image}
+Образ сам проверит карту, кеш ядер и пробу на эталоне. Если что-то не так — откажется работать до всяких денег.
+
+4. Проверить: /node <ваш адрес> — запись узла и уведомления о его заданиях.
+
+Залог забирается обратно (withdraw_stake), пока узел не пойман на подмене. Ключ с залогом на арендованную машину везти не нужно — раздел 9 инструкции.
+{hours}
+Полная инструкция: {guide}"""
 
 
 # --- бот ------------------------------------------------------------------
@@ -523,7 +601,14 @@ class Bot:
         arg = parts[1].strip() if len(parts) > 1 else ""
         try:
             if cmd in ("/start", "/help"):
-                self.api.send(chat, HELP)
+                hours = getattr(self.cfg, "hours", None)
+                self.api.send(chat, HELP + ("\n\n" + hours_text(hours, self.now())
+                                            if hours else ""))
+            elif cmd == "/hours":
+                self.api.send(chat, hours_text(getattr(self.cfg, "hours", None),
+                                               self.now()))
+            elif cmd == "/gpu":
+                self.api.send(chat, self.gpu_text())
             elif cmd == "/limits":
                 left = self.cfg.daily - self.store.used(chat, self.day())
                 self.api.send(chat, f"Сегодня осталось вопросов: "
@@ -567,6 +652,19 @@ class Bot:
             f"(узлу {money(price, p.settlement)}, проверяющим "
             f"{money(fee, p.settlement)}) — платит бот",
         ])
+
+    def gpu_text(self):
+        try:
+            p = self.params()
+            arch, stake = p.pinned_arch, money(p.min_stake, p.stake_unit)
+        except chain.ChainUnavailable:
+            arch, stake = "sm_89", "залог реестра (/registry)"
+        hours = getattr(self.cfg, "hours", None)
+        return GPU.format(
+            arch=arch, stake=stake, image=NODE_IMAGE,
+            contract=self.cfg.contract, guide=GUIDE_URL,
+            hours=(f"\nЗадания в тестовом режиме идут с {hours[0]}:00 до "
+                   f"{hours[1]}:00 по Москве.\n" if hours else ""))
 
     def balance_text(self):
         addr = self.sender.address()
@@ -631,6 +729,12 @@ class Bot:
             return
         day = self.day()
         unlimited = chat in self.cfg.admins
+        hours = getattr(self.cfg, "hours", None)
+        if not unlimited and not is_open(hours, self.now()):
+            # Отказ ДО лимита и сделки: вопрос никто бы не взял, а бот
+            # заплатил бы газ за постановку и снятие.
+            self.api.send(chat, hours_text(hours, self.now()))
+            return
         if not unlimited and not self.store.take(chat, day, self.cfg.daily):
             self.api.send(chat, f"На сегодня вопросы кончились "
                                 f"({self.cfg.daily} в сутки). Завтра снова.")

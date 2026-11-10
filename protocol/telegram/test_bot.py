@@ -278,6 +278,52 @@ def test_limits(tmp):
     ok(any("Не удалось" in t for t in texts(f)), "и человек знает почему")
 
 
+def test_hours(tmp):
+    ok(bot.parse_hours("") is None and bot.parse_hours("19-21") == (19, 21)
+       and bot.parse_hours("19:00-21:00") == (19, 21), "часы разбираются")
+    try:
+        bot.parse_hours("21-19")
+        ok(False, "обратный интервал отвергнут")
+    except SystemExit:
+        ok(True, "обратный интервал отвергнут")
+    b, clock, _ = make(tmp)
+    b.cfg.hours = (19, 21)
+    day = 1_000_000 - 1_000_000 % 86400   # полночь UTC
+    clock[0] = day + 12 * 3600            # 15:00 МСК
+    b.handle(msg(5, "вопрос"))
+    ok(len(b.sender.sent) == 0, "вне часов сделка не ушла")
+    ok("откроется через 4 ч 0 мин" in b.api.sent[-1][1],
+       "человеку сказано, когда откроется")
+    ok(b.store.used(5, b.day()) == 0, "и лимит не тронут")
+    b.cfg.admins = {7}
+    b.handle(msg(7, "вопрос"))
+    ok(len(b.sender.sent) == 1, "админу можно и вне часов")
+    clock[0] = day + 16 * 3600 + 30 * 60  # 19:30 МСК
+    b.handle(msg(5, "вопрос"))
+    ok(len(b.sender.sent) == 2, "в часы работы вопрос уходит")
+    b.handle(msg(5, "/hours"))
+    ok("Сейчас открыто" in b.api.sent[-1][1], "/hours видит, что открыто")
+    clock[0] = day + 18 * 3600 + 10 * 60  # 21:10 МСК
+    b.handle(msg(5, "/hours"))
+    ok("откроется через 21 ч 50 мин" in b.api.sent[-1][1],
+       "после 21:00 — до завтрашних 19:00")
+    b.handle(msg(5, "/start"))
+    ok("/gpu" in b.api.sent[-1][1] and "19:00 до 21:00" in b.api.sent[-1][1],
+       "/start называет часы и /gpu")
+
+
+def test_gpu(tmp):
+    b, _, _ = make(tmp)
+    b.cfg.hours = (19, 21)
+    b.handle(msg(5, "/gpu"))
+    t = b.api.sent[-1][1]
+    ok(bot.NODE_IMAGE in t and "-e CONTRACT=axm1reg" in t,
+       "/gpu: образ по digest и реестр бота")
+    ok("0.3 BARTR" in t or "0,3 BARTR" in t, "/gpu: залог из цепочки")
+    ok("sm_89" in t and "с 19:00 до 21:00" in t, "/gpu: класс и часы")
+    ok(len(t) < 4096, "/gpu влезает в одно сообщение Telegram")
+
+
 def test_open_timeout(tmp):
     b, clock, _ = make(tmp)
     b.handle(msg(1, "вопрос"))
@@ -431,7 +477,8 @@ if __name__ == "__main__":
     try:
         for t in (test_ask_and_confirmed, test_job_command,
                   test_guilty_and_no_verdict,
-                  test_answer_unreachable, test_limits, test_open_timeout,
+                  test_answer_unreachable, test_limits, test_hours, test_gpu,
+                  test_open_timeout,
                   test_nodes, test_prompt_server, test_privacy,
                   test_signed_prompt):
             t(tempfile.mkdtemp(dir=tmp))
