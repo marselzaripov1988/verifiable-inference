@@ -41,6 +41,7 @@ import sys
 
 import canon
 import chain
+import greedy
 import vllm_client as vllm
 
 
@@ -160,6 +161,9 @@ def run(base, model, job_id, prompt, answer, producer_vector=None,
     # Расхождение — свидетельство, а не вердикт. Без вектора исполнителя
     # его не посчитать, и это не мешает: контракт сравнивает хэши.
     d = canon.divergence_micro(producer_vector, mine) if producer_vector else 0
+    # Жадная проверка — пока только свидетельство в журнал: в сообщение
+    # контракта она не входит, и её сбой проверку не останавливает.
+    g = greedy.check(base, model, prompt, answer)
 
     return {
         "msg": {
@@ -171,6 +175,7 @@ def run(base, model, job_id, prompt, answer, producer_vector=None,
         },
         "divergence_micro": d,
         "vector_len": len(mine),
+        "greedy": g,
     }
 
 

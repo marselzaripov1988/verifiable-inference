@@ -169,5 +169,6 @@ exec python3 -u loop.py \
     --endpoint "$ENDPOINT" \
     --prompts "$PROMPTS" --bundles "$BUNDLES" \
     --state "$NODE_HOME/loop-state.json" --sign-key "$NODE_HOME/sign.key" \
+    --greedy-log "$NODE_HOME/greedy.jsonl" \
     --every "$EVERY" --max-tokens "$MAX_TOKENS" --min-time-left "$MIN_LEFT" \
     --min-gas "$MIN_GAS"

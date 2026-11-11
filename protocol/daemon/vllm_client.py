@@ -163,12 +163,23 @@ def score(base, model, text):
     Повторы обязательны: см. SCORE_ATTEMPTS. Без них проверяющий
     отказывался бы работать на большинстве заданий длиннее 56 токенов.
     """
+    return echo(base, model, text, 1)["token_logprobs"]
+
+
+def echo(base, model, text, k):
+    """Оценка с `k` лучшими вариантами в каждой позиции — весь `logprobs`.
+
+    При k=1 запрос тот же, что у `score`, байт в байт: хэш считается
+    только из него. Больше вариантов нужно жадной проверке (`greedy.py`),
+    и она ходит отдельным вызовом, чтобы не трогать то, что сравнивает
+    контракт.
+    """
     last = None
     for _ in range(SCORE_ATTEMPTS):
         try:
             r = _post(base, "/completions", {
                 "model": model, "prompt": text, "max_tokens": 0,
-                "echo": True, "logprobs": 1,
+                "echo": True, "logprobs": k,
                 "temperature": TEMPERATURE, "top_p": TOP_P,
             })
         except urllib.error.HTTPError as e:
@@ -183,7 +194,7 @@ def score(base, model, text):
                 last = e
                 continue
             raise
-        return r["choices"][0]["logprobs"]["token_logprobs"]
+        return r["choices"][0]["logprobs"]
     raise ScoringFailed(
         f"логвероятности не получены за {SCORE_ATTEMPTS} попыток, "
         f"последняя ошибка: {last}")

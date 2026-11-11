@@ -71,6 +71,7 @@ import chain
 import checker
 import delivery
 import executor
+import greedy
 import sign
 import tx
 
@@ -340,7 +341,8 @@ class Loop:
                  bundles=None, prompts=(), peers=(), state_path=None,
                  min_left=0, max_checks=1, max_scan=200, max_tokens=200,
                  skip_expired=False, endpoint=None, out=None,
-                 gas_denom=None, min_gas=0, gas_every=600, clock=time.time):
+                 gas_denom=None, min_gas=0, gas_every=600, clock=time.time,
+                 greedy_log=None):
         self.rest = rest
         self.contract = contract
         self.sender = sender
@@ -352,6 +354,7 @@ class Loop:
         self.prompts = tuple(prompts)
         self.peers = tuple(peers)
         self.state_path = state_path
+        self.greedy_log = greedy_log
         self.min_left = min_left
         self.max_checks = max_checks
         self.max_scan = max_scan
@@ -623,7 +626,27 @@ class Loop:
                 == job.get("logprobs_hash"))
         self.say(f"  {job_id}: расхождение {r['divergence_micro']}, "
                  f"хэш {'совпал' if same else 'НЕ СОВПАЛ'}")
+        self.note_greedy(job_id, job, r.get("greedy"), same)
         return r["msg"]
+
+    def note_greedy(self, job_id, job, g, same):
+        """Вердикт жадной проверки — в журнал и в файл. В цепочку не идёт."""
+        if g is None:
+            self.say(f"  {job_id}: жадная проверка не выполнена")
+            return
+        self.say(f"  {job_id}: жадность — {g['over_gap']} из {g['tokens']} "
+                 f"токенов с разрывом больше {greedy.GAP}, наибольший "
+                 f"{g['max_gap']}"
+                 + (" — ПОХОЖЕ НА ЧУЖУЮ МОДЕЛЬ" if g["suspect"] else ""))
+        if not self.greedy_log:
+            return
+        row = dict(g, job_id=int(job_id), executor=job.get("executor"),
+                   hash_same=same, at=int(self.clock()))
+        try:
+            with open(self.greedy_log, "a", encoding="utf-8") as f:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        except OSError as e:
+            self.say(f"  {job_id}: журнал жадности не дописан ({e})")
 
     # --- цикл -------------------------------------------------------------
 
@@ -794,6 +817,10 @@ def main():
                                       "цепочке записан другой, петля объявит "
                                       "этот")
     p.add_argument("--state", help="файл с отметкой просмотра")
+    p.add_argument("--greedy-log", metavar="ФАЙЛ",
+                   help="куда дописывать вердикты жадной проверки, по строке "
+                        "JSON на задание. Пока только наблюдение: в цепочку "
+                        "вердикт не идёт")
     p.add_argument("--min-gas", type=int, default=100000, metavar="ЕДИНИЦ",
                    help="порог остатка на газ в монете из --gas-prices; ниже — "
                         "предупреждение. 100000 uaxm = 0,1 AXM, это сотни "
@@ -880,7 +907,8 @@ def main():
                 min_left=a.min_time_left, max_checks=a.max_checks,
                 max_scan=a.max_scan, max_tokens=a.max_tokens,
                 skip_expired=a.skip_expired, endpoint=a.endpoint,
-                gas_denom=chain.gas_denom(a.gas_prices), min_gas=a.min_gas)
+                gas_denom=chain.gas_denom(a.gas_prices), min_gas=a.min_gas,
+                greedy_log=a.greedy_log)
     print(f"узел {me}, роли {'+'.join(roles)}", file=sys.stderr)
 
     # Подряд неразобранных отказов. Один такой не должен убивать узел:
