@@ -25,6 +25,7 @@ import vllm_client as vllm  # noqa: E402
 #: Настоящая оценка, снятая до того, как тесты начнут её подменять:
 #: ниже проверяются её собственные повторы, а не подставная.
 REAL_SCORE = vllm.score
+REAL_GENERATE = vllm.generate
 
 #: Настоящая проверка узла. Один из тестов подменяет её заглушкой, и без
 #: возврата к настоящей заглушка протекала бы в следующие тесты.
@@ -86,6 +87,32 @@ def patch(fake):
     # self_check_problems НЕ подменяется: он пользуется и generate, и
     # score, то есть на подставном сервере работает настоящий.
     vllm.self_check_problems = REAL_SELF_CHECK
+
+
+
+def test_generate_bez_shtrafa():
+    """Генерация жадная по-настоящему: штраф за повтор выключен явно.
+
+    vLLM подмешивает `generation_config.json` модели, и у Qwen2.5 оттуда
+    приходит `repetition_penalty: 1.05`. Замер 11 ноября: со штрафом 4%
+    токенов честного ответа не лучшие в своей позиции, и проверить, что
+    текст породила эта модель, по вероятностям нельзя.
+    """
+    print("\n### запрос генерации: жадно, без штрафа за повтор")
+    seen = []
+    def capture(base, path, payload, timeout=600):
+        seen.append(payload)
+        return {"choices": [{"text": "ок", "logprobs": {"tokens": ["ок"]}}]}
+    saved = vllm._post
+    vllm._post = capture
+    try:
+        text, toks = REAL_GENERATE("http://x/v1", "m", "p", 16)
+    finally:
+        vllm._post = saved
+    pl = seen[0]
+    ok((text, toks) == ("ок", ["ок"]), "ответ разобран")
+    ok(pl.get("repetition_penalty") == 1, "штраф за повтор выключен явно")
+    ok(pl.get("temperature") == 0, "температура 0")
 
 
 def main():
@@ -162,6 +189,7 @@ def main():
 
     test_chain_params()
     test_score_retries()
+    test_generate_bez_shtrafa()
     test_conformance()
     test_shipped_probe()
     test_checker_needs_probe()

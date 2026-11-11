@@ -52,6 +52,15 @@ TEMPERATURE = 0
 TOP_P = 1
 SEED = 42
 
+#: Штраф за повтор — явно выключен. vLLM подмешивает в запрос настройки из
+#: `generation_config.json` модели, а у Qwen2.5 там `repetition_penalty:
+#: 1.05`; temperature и top_p запрос перекрывает, штраф — нет. Замерено
+#: 11 ноября на 4090: со штрафом 4% токенов честного ответа не лучшие в
+#: своей позиции, разрыв до 2,0, без штрафа — 0,28%. Пока штраф включён,
+#: проверить по вероятностям, что текст породила именно эта модель, нельзя:
+#: score штрафа не знает.
+REPETITION_PENALTY = 1
+
 #: Сколько раз повторять оценку. vLLM 0.31.0 изредка выдаёт в
 #: логвероятностях NaN и тогда ОТКАЗЫВАЕТСЯ отдать свой же ответ:
 #: «Out of range float values are not JSON compliant: nan», HTTP 400.
@@ -138,7 +147,7 @@ def generate(base, model, prompt, max_tokens):
     r = _post(base, "/completions", {
         "model": model, "prompt": prompt, "max_tokens": max_tokens,
         "temperature": TEMPERATURE, "top_p": TOP_P, "seed": SEED,
-        "logprobs": 1,
+        "repetition_penalty": REPETITION_PENALTY, "logprobs": 1,
     })
     ch = r["choices"][0]
     return ch["text"], ch["logprobs"]["tokens"]
