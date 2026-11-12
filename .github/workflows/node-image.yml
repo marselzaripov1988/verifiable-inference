@@ -67,8 +67,22 @@ jobs:
           set -eu
           out=$(docker run --rm --entrypoint sh "$IMAGE:${{ github.sha }}" -c '
             axmd version
-            ls /opt/node/cache/*.tar.gz | wc -l
-            python3 -c "import sys; sys.path.insert(0,\"/opt/node/daemon\"); import loop, client, chain, conformance; print(\"демоны импортируются\")"
+            python3 -c "import sys; sys.path.insert(0,\"/opt/node/daemon\"); import loop, client, chain, conformance, models; print(\"демоны импортируются\")"
+            python3 -c "
+          import hashlib, os, sys
+          sys.path.insert(0, \"/opt/node/daemon\")
+          import models
+          bad = []
+          for m, d in models.MODELS.items():
+              for arch, c in d[\"classes\"].items():
+                  tar = \"/opt/node/cache/%s.tar.gz\" % c[\"cache\"]
+                  want = open(\"/opt/node/cache/%s.sha256\" % c[\"cache\"]).read().split()[0]
+                  if hashlib.sha256(open(tar, \"rb\").read()).hexdigest() != want:
+                      bad.append(tar)
+                  if not os.path.exists(\"/opt/node/daemon/probe/\" + c[\"probe\"]):
+                      bad.append(c[\"probe\"])
+          print(\"не хватает: \" + \" \".join(bad) if bad else \"кеши и эталоны всех пар на месте\")
+          "
             test -x /opt/node/start.sh && echo "start.sh исполняемый"
             ls /opt/node/daemon/test_*.py 2>/dev/null | wc -l
           ')
@@ -81,9 +95,12 @@ jobs:
             *"демоны импортируются"*) echo "ок: демоны импортируются" ;;
             *) echo "ОТКАЗ: демоны не импортируются"; exit 1 ;;
           esac
-          printf '%s\n' "$out" | sed -n '2p' | grep -qx 3 \
-            || { echo "ОТКАЗ: кешей ядер не три"; exit 1; }
-          echo "ок: кеш всех трёх классов на месте"
+          # Число кешей не прибито: оно следует из daemon/models.py — по
+          # кешу и эталону на каждую пару модель — класс.
+          case "$out" in
+            *"кеши и эталоны всех пар на месте"*) echo "ок: кеши и эталоны всех пар модель — класс на месте, sha256 сошёлся" ;;
+            *) echo "ОТКАЗ: кеши или эталоны не на месте"; exit 1 ;;
+          esac
 
       - name: отказы
         # Отказ с внятной причиной — такой же признак, как успех.
