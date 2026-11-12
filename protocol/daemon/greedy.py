@@ -26,6 +26,7 @@
 этому порогу отнимать залог. Порог уточняется по журналу живых заданий.
 """
 
+import models
 import vllm_client as vllm
 
 #: Разрыв, выше которого токен считается «не своим», в долях натурального
@@ -60,15 +61,20 @@ def gaps(base, model, prompt, answer):
     return out
 
 
-def verdict(g):
-    """Сводка по разрывам. `suspect` — ответ не похож на жадный."""
-    bad = sum(x > GAP for x in g)
+def verdict(g, rule=None):
+    """Сводка по разрывам. `suspect` — ответ не похож на жадный.
+
+    `rule` — порог модели из `models.greedy_rule`; без него — GAP и
+    MIN_TOKENS, замеренные на Qwen2.5."""
+    gap = (rule or {}).get("gap", GAP)
+    need = (rule or {}).get("min_tokens", MIN_TOKENS)
+    bad = sum(x > gap for x in g)
     return {
         "tokens": len(g),
         "over_gap": bad,
         "max_gap": round(max(g), 3) if g else 0.0,
-        "suspect": bad >= MIN_TOKENS,
-        "rule": f">= {MIN_TOKENS} tokens with gap > {GAP}",
+        "suspect": bad >= need,
+        "rule": f">= {need} tokens with gap > {gap}",
     }
 
 
@@ -76,7 +82,8 @@ def check(base, model, prompt, answer):
     """Вердикт по паре или None, если узел не ответил. Никогда не бросает:
     жадная проверка не должна мешать основной."""
     try:
-        return verdict(gaps(base, model, prompt, answer))
+        return verdict(gaps(base, model, prompt, answer),
+                       models.greedy_rule(model))
     except vllm.NODE_FAILURES:
         return None
     except (KeyError, TypeError, ValueError):

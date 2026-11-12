@@ -49,6 +49,11 @@ COPY daemon/kernel-cache/sm_120/kernel-cache.tar.gz  /opt/node/cache/sm_120.tar.
 COPY daemon/kernel-cache/sm_89/SHA256SUMS            /opt/node/cache/sm_89.sha256
 COPY daemon/kernel-cache/sm_86/SHA256SUMS            /opt/node/cache/sm_86.sha256
 COPY daemon/kernel-cache/sm_120/SHA256SUMS           /opt/node/cache/sm_120.sha256
+# Huihui-Qwen3-8B-abliterated-v2: свой кеш на каждом классе (daemon/models.py)
+COPY daemon/kernel-cache/q3-sm_89/kernel-cache.tar.gz /opt/node/cache/q3-sm_89.tar.gz
+COPY daemon/kernel-cache/q3-sm_86/kernel-cache.tar.gz /opt/node/cache/q3-sm_86.tar.gz
+COPY daemon/kernel-cache/q3-sm_89/SHA256SUMS          /opt/node/cache/q3-sm_89.sha256
+COPY daemon/kernel-cache/q3-sm_86/SHA256SUMS          /opt/node/cache/q3-sm_86.sha256
 
 COPY daemon/*.py        /opt/node/daemon/
 COPY daemon/probe/      /opt/node/daemon/probe/
@@ -57,7 +62,7 @@ COPY node-image/start.sh /opt/node/start.sh
 RUN set -eu; \
     rm -f /opt/node/daemon/test_*.py; \
     chmod +x /opt/node/start.sh; \
-    python3 -c "import sys; sys.path.insert(0,'/opt/node/daemon'); import loop, client, chain, conformance" \
+    python3 -c "import sys; sys.path.insert(0,'/opt/node/daemon'); import loop, client, chain, conformance, models" \
       || { echo "ОТКАЗ: демоны не импортируются"; exit 1; }
 
 # Связка модель/рантайм/dtype прибита настройкой контракта; здесь только

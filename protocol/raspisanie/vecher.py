@@ -142,6 +142,19 @@ def show(conf, inst_id):
     return None
 
 
+def stale_image(inst, conf):
+    """Образ машины, если он не тот, что в настройках, иначе None.
+
+    Остановленная машина при запуске остаётся на образе, с которым её
+    создали: сменить digest в настройках мало, прежние машины так и
+    работали бы на старой сборке. Такую машину не запускают, а заменяют.
+    """
+    img = inst.get("image_uuid")
+    if img and img != conf["image"]:
+        return img
+    return None
+
+
 def host_port(inst, container_port):
     ports = inst.get("ports") or {}
     for m in ports.get(f"{container_port}/tcp") or []:
@@ -269,7 +282,12 @@ def node_up(conf, node, avoid_machines, tried, results):
     inst_id = (load_state().get(name) or {}).get("instance")
     if inst_id:
         cur = show(conf, inst_id)
-        if cur is None:
+        if cur is not None and stale_image(cur, conf):
+            log(name, f"машина {inst_id} на прежнем образе "
+                      f"{stale_image(cur, conf)[-12:]} — заменяю")
+            destroy(conf, name, inst_id)
+            save_instance(name, None)
+        elif cur is None:
             log(name, f"прежней машины {inst_id} нет")
             save_instance(name, None)
         else:

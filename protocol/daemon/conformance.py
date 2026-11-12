@@ -46,6 +46,7 @@ import sys
 
 import canon
 import chain
+import models
 import vllm_client as vllm
 
 #: Эталон рядом с демоном. Это не источник истины: истина — обязательство
@@ -64,9 +65,19 @@ PROBE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "probe")
 PROBE_PATH = os.path.join(PROBE_DIR, "probe-v2-sm89.json")
 
 
-def probe_path_for(arch):
+def probe_path_for(arch, model=None):
     """Эталон класса. Неизвестная архитектура — отказ, а не умолчание:
-    умолчание здесь означало бы сверку с эталоном чужого класса."""
+    умолчание здесь означало бы сверку с эталоном чужого класса.
+
+    С `model` эталон берётся по паре модель — класс из `models.py`: у
+    каждой модели свои векторы. Без неё — эталоны Qwen2.5 по классу,
+    как было до второй модели."""
+    if model is not None:
+        try:
+            name = models.lookup(model, arch)["probe"]
+        except models.Unsupported as e:
+            raise ProbeMismatch(str(e))
+        return os.path.join(PROBE_DIR, name)
     name = PROBE_BY_ARCH.get(arch)
     if name is None:
         raise ProbeMismatch(
@@ -246,7 +257,7 @@ def main():
                   "укажите --probe", file=sys.stderr)
             return 2
         try:
-            probe = probe_path_for(params.pinned_arch)
+            probe = probe_path_for(params.pinned_arch, params.pinned_model)
         except ProbeMismatch as e:
             print(f"ОТКАЗ: {e}", file=sys.stderr)
             return 1

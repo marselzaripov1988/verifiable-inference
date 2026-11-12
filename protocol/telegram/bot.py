@@ -61,8 +61,24 @@ TG_LIMIT = 4000  # у Telegram 4096; запас на заголовок
 # текста, что выложен.
 CHAT_TEMPLATES = {
     "qwen": "<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n",
+    # Qwen3 без рассуждений: так шаблон модели собирает ответ при
+    # enable_thinking=False — пустым блоком <think>. Без него Qwen3 сначала
+    # рассуждает вслух, и ответ съедает весь лимит токенов.
+    "qwen3": ("<|im_start|>user\n{q}<|im_end|>\n<|im_start|>assistant\n"
+              "<think>\n\n</think>\n\n"),
     "none": "{q}",
 }
+
+
+def template_for(name, model):
+    """Шаблон по настройке; `auto` — по модели, которую прибил реестр.
+
+    `auto` нужен для смены модели в реестре: бот подхватывает её сам,
+    без перезапуска с другим CHAT_TEMPLATE."""
+    if name != "auto":
+        return CHAT_TEMPLATES[name]
+    return CHAT_TEMPLATES["qwen3" if "qwen3" in (model or "").lower()
+                          else "qwen"]
 
 
 # --- настройки ------------------------------------------------------------
@@ -92,10 +108,10 @@ class Config:
         self.daily = int(env.get("DAILY_LIMIT", "3"))
         self.max_chars = int(env.get("MAX_CHARS", "2000"))
         self.explorer = env.get("EXPLORER", "https://axiomechain.org")
-        self.template = env.get("CHAT_TEMPLATE", "qwen")
-        if self.template not in CHAT_TEMPLATES:
+        self.template = env.get("CHAT_TEMPLATE", "auto")
+        if self.template != "auto" and self.template not in CHAT_TEMPLATES:
             raise SystemExit(f"CHAT_TEMPLATE: одно из "
-                             f"{', '.join(CHAT_TEMPLATES)}, а не "
+                             f"auto, {', '.join(CHAT_TEMPLATES)}, а не "
                              f"{self.template!r}")
         self.open_timeout = int(env.get("OPEN_TIMEOUT", "900"))
         self.prompts = env.get("PROMPTS_DIR", "./prompts")
@@ -1029,7 +1045,8 @@ class Bot:
 
     def submit(self, question):
         p = self.params()
-        prompt = CHAT_TEMPLATES[self.cfg.template].format(q=question)
+        prompt = template_for(self.cfg.template,
+                              p.pinned_model).format(q=question)
         ph = chain.text_hash(prompt)
         # Текст выкладывается ДО сделки: задание возьмут сразу, и брать
         # текст узлу должно быть уже откуда.

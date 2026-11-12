@@ -56,6 +56,14 @@ class Instance(unittest.TestCase):
     def test_addr_stopped(self):
         self.assertIsNone(vecher.addr({"public_ipaddr": "1.2.3.4", "ports": None}))
 
+    def test_stale_image(self):
+        conf = {"image": "ghcr.io/x/node@sha256:new"}
+        self.assertEqual(vecher.stale_image({"image_uuid": "ghcr.io/x/node@sha256:old"}, conf),
+                         "ghcr.io/x/node@sha256:old")
+        self.assertIsNone(vecher.stale_image({"image_uuid": "ghcr.io/x/node@sha256:new"}, conf))
+        # поле не пришло — машину не губим из-за неизвестности
+        self.assertIsNone(vecher.stale_image({}, conf))
+
 
 class Offers(unittest.TestCase):
     OFFERS = [{"id": 1, "machine_id": 10, "dph_total": 0.30},

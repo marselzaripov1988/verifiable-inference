@@ -563,6 +563,18 @@ def test_pay(tmp):
        "упавшая сделка не считается")
 
 
+def test_templates():
+    print("### шаблон по модели реестра")
+    q3 = bot.template_for("auto", "huihui-ai/Huihui-Qwen3-8B-abliterated-v2")
+    ok(q3.format(q="X").endswith("<think>\n\n</think>\n\n"),
+       "Qwen3 — пустой блок рассуждений")
+    q25 = bot.template_for("auto", "Qwen/Qwen2.5-7B-Instruct").format(q="X")
+    ok(q25.endswith("<|im_start|>assistant\n") and "<think>" not in q25,
+       "Qwen2.5 — прежний шаблон")
+    ok(bot.template_for("none", "huihui-ai/Huihui-Qwen3-8B-abliterated-v2")
+       == "{q}", "явная настройка сильнее модели")
+
+
 def test_split():
     parts = bot.split_text("строка\n" * 1000, limit=100)
     ok(all(len(p) <= 100 for p in parts) and "".join(parts) == "строка\n" * 1000,
@@ -580,6 +592,7 @@ if __name__ == "__main__":
                   test_signed_prompt, test_pay):
             t(tempfile.mkdtemp(dir=tmp))
         test_split()
+        test_templates()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
     print(f"\n{'ВСЁ ПРОШЛО' if not FAILS else f'ПРОВАЛОВ: {len(FAILS)}'}")

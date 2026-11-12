@@ -635,7 +635,7 @@ class Loop:
             self.say(f"  {job_id}: жадная проверка не выполнена")
             return
         self.say(f"  {job_id}: жадность — {g['over_gap']} из {g['tokens']} "
-                 f"токенов с разрывом больше {greedy.GAP}, наибольший "
+                 f"токенов ({g['rule']}), наибольший "
                  f"{g['max_gap']}"
                  + (" — ПОХОЖЕ НА ЧУЖУЮ МОДЕЛЬ" if g["suspect"] else ""))
         if not self.greedy_log:

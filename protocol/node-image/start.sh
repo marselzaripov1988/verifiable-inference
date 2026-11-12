@@ -15,7 +15,7 @@ REST=${REST:-https://axm-lcd.trickle.pro}
 RPC=${RPC:-https://api-chain.axiomechain.org}
 CHAIN_ID=${CHAIN_ID:-axiome-1}
 GAS_PRICES=${GAS_PRICES:-0.0025uaxm}
-MODEL=${MODEL:-Qwen/Qwen2.5-7B-Instruct}
+MODEL=${MODEL:-}   # пусто — взять из цепочки (pinned_model), см. шаг 2
 DTYPE=${DTYPE:-bfloat16}
 MAX_TOKENS=${MAX_TOKENS:-200}
 EVERY=${EVERY:-5}
@@ -55,8 +55,8 @@ case "$CARD" in
 esac
 ok "$CARD, драйвер $DRIVER → класс $CLASS"
 
-say "2. класс сверяется с цепочкой"
-CHAIN_CLASS=$(python3 - <<PY
+say "2. класс и модель сверяются с цепочкой"
+CHAIN=$(python3 - <<PY
 import sys
 sys.path.insert(0, "$DAEMON")
 import chain
@@ -64,29 +64,42 @@ try:
     p = chain.load_params("$REST", "$CONTRACT")
 except Exception as e:
     print("ОШИБКА", e, file=sys.stderr); raise SystemExit(1)
-print(p.pinned_arch)
+print(p.pinned_arch, p.pinned_model)
 PY
 ) || fail "настройки из цепочки не прочитаны: проверьте CONTRACT и REST"
+read -r CHAIN_CLASS CHAIN_MODEL <<< "$CHAIN"
 [ "$CHAIN_CLASS" = "$CLASS" ] || fail "у реестра класс $CHAIN_CLASS, а карта $CLASS.
   Возьмите адрес своего класса — см. таблицу в protocol/УЗЕЛ.md."
 ok "реестр того же класса: $CHAIN_CLASS"
+# Модель — из цепочки. MODEL оставлен для явной сверки: если задан и не
+# совпал, это отказ, а не тихая подмена.
+if [ -n "$MODEL" ] && [ "$MODEL" != "$CHAIN_MODEL" ]; then
+    fail "MODEL=$MODEL, а реестр прибил $CHAIN_MODEL. Уберите MODEL — узел возьмёт модель из цепочки"
+fi
+MODEL=$CHAIN_MODEL
+PICK=$(python3 "$DAEMON/models.py" "$MODEL" "$CLASS") \
+    || fail "образ не умеет $MODEL на $CLASS: нет прибитого кеша ядер и эталона пробы"
+read -r CACHE REVISION <<< "$PICK"
+ok "модель $MODEL${REVISION:+ @ ${REVISION:0:12}}, кеш $CACHE"
 
 say "3. кеш ядер — до запуска сервера"
-want=$(cut -d' ' -f1 "/opt/node/cache/$CLASS.sha256")
-got=$(sha256sum "/opt/node/cache/$CLASS.tar.gz" | cut -d' ' -f1)
+want=$(cut -d' ' -f1 "/opt/node/cache/$CACHE.sha256")
+got=$(sha256sum "/opt/node/cache/$CACHE.tar.gz" | cut -d' ' -f1)
 [ "$want" = "$got" ] || fail "архив кеша в образе испорчен: $got против $want"
 rm -rf "$NODE_HOME/.cache/vllm"
 mkdir -p "$NODE_HOME/.cache"
-tar xzf "/opt/node/cache/$CLASS.tar.gz" -C "$NODE_HOME/.cache" --no-same-owner \
+tar xzf "/opt/node/cache/$CACHE.tar.gz" -C "$NODE_HOME/.cache" --no-same-owner \
     || fail "кеш не распакован"
-ok "кеш $CLASS на месте, $(du -sm "$NODE_HOME/.cache/vllm" | cut -f1) МБ, sha256 сошёлся"
+ok "кеш $CACHE на месте, $(du -sm "$NODE_HOME/.cache/vllm" | cut -f1) МБ, sha256 сошёлся"
 
 say "4. vLLM с прибитыми флагами"
 # Пусковая команда отдельным файлом, а не строкой: pkill -f по ssh иначе
 # убивает собственную оболочку — проверено дважды.
+REV_FLAG=""
+[ "$REVISION" != "-" ] && REV_FLAG="--revision $REVISION"
 cat > "$NODE_HOME/serve.sh" <<SH
 #!/bin/bash
-exec vllm serve "$MODEL" \
+exec vllm serve "$MODEL" $REV_FLAG \
   --dtype "$DTYPE" --max-model-len 4096 --gpu-memory-utilization 0.92 \
   --no-enable-prefix-caching --seed 0 --host 127.0.0.1 --port "$VLLM_PORT" \
   --no-enable-flashinfer-autotune \
