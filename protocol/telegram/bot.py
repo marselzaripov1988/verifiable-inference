@@ -658,10 +658,10 @@ HELP = """Бот проверяемого вывода на Axiome.
 /unnode <адрес> — отписаться
 /nodes — мои подписки"""
 
-#: Образ узла по digest: тег можно перевесить, digest — нет. Это v3,
-#: проверенная на 4090 9–10 ноября (protocol/УЗЕЛ.md).
+#: Образ узла по digest: тег можно перевесить, digest — нет. Это v6:
+#: модель и кеш выбираются по цепочке, Qwen2.5 и Qwen3 (protocol/УЗЕЛ.md).
 NODE_IMAGE = ("ghcr.io/marselzaripov1988/verifiable-inference-node@sha256:"
-              "6a0d4c7906e59dd7faac0e7e5e6f06b54653bde045084634262cbb3e504757a5")
+              "598261b75d93613f50b42225051c7bedd3640442dcc9d38c1e667eaefa8ad5d7")
 GUIDE_URL = ("https://github.com/marselzaripov1988/verifiable-inference/"
              "blob/main/protocol/%D0%A3%D0%97%D0%95%D0%9B.md")
 
