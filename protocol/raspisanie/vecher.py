@@ -48,6 +48,11 @@ SSH_OPTS = [
     "-o", "ServerAliveInterval=30",
 ]
 LOOP_MARK = "===== 8. петля"
+
+#: Пауза перед новым поиском, если vast.ai не нашёл предложений. 12 ноября
+#: первый поиск вечера вернул пусто, а следующий через 4 с нашёл машину —
+#: пустой ответ бывает мимолётным, сдаваться по нему нельзя.
+RENT_RETRY_PAUSE = 30
 _print_lock = threading.Lock()
 _rent_lock = threading.Lock()
 
@@ -309,7 +314,8 @@ def node_up(conf, node, avoid_machines, tried, results):
             tries += 1
             new_id = rent(conf, name, avoid_machines, tried)
             if new_id is None:
-                break
+                time.sleep(RENT_RETRY_PAUSE)
+                continue
             inst = wait_running(conf, name, new_id, conf["rent_wait_min"])
             if inst is None:
                 destroy(conf, name, new_id)
@@ -379,6 +385,14 @@ for i in 1 2 3 4; do
   echo "попытка $i: $(echo "$out" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d["code"],d["txhash"][:10],d.get("raw_log","")[:120])' 2>/dev/null)"
   sleep 12
 done
+# Сделка последней попытки может войти в блок позже: 12 ноября узел
+# получил «ОТКАЗ», а проба в цепочке была. Перед отказом смотрим ещё раз.
+for i in 1 2 3; do
+  sleep 10
+  E=$(axmd q wasm contract-state smart $C "{{\"executor\":{{\"address\":\"$A\"}}}}" $N -o json)
+  G=$(axmd q wasm contract-state smart $C '{{"config":{{}}}}' $N -o json)
+  [ "$(need "$E" "$G")" = нет ] && {{ echo "проба в цепочке"; exit 0; }}
+done
 echo "ОТКАЗ: проба не сдана"; exit 1
 """
 
@@ -391,6 +405,10 @@ def ensure_conformance(conf, name, ip, p22):
     except subprocess.TimeoutExpired:
         log(name, "ОТКАЗ: сдача пробы не ответила")
         return False
+    if code != 0:
+        # Попытки сдачи видны только здесь: без них отказ не разобрать.
+        for line in out.splitlines()[-6:-1]:
+            log(name, line)
     log(name, out.splitlines()[-1] if out else f"проба: код {code}")
     return code == 0
 

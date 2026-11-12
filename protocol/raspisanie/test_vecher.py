@@ -140,12 +140,16 @@ class StakeScript(unittest.TestCase):
 class SshRefused(unittest.TestCase):
     """Машину, к которой не пускает ssh, уничтожают и берут другую."""
 
-    def run_up(self, ssh_ok, rent_tries=3):
+    def run_up(self, ssh_ok, rent_tries=3, empty_searches=0):
         from unittest import mock
         conf = {"rent_tries": rent_tries, "rent_wait_min": 1}
         rented, destroyed = [], []
+        empty = [empty_searches]
 
         def rent(conf, name, avoid, tried):
+            if empty[0]:
+                empty[0] -= 1
+                return None
             rented.append(100 + len(rented))
             return rented[-1]
 
@@ -162,7 +166,7 @@ class SshRefused(unittest.TestCase):
                 addr=lambda inst: ("1.2.3.%d" % inst["id"], 22, 8081),
                 wait_ssh=lambda ip, port: ip in ssh_ok,
                 destroy=lambda conf, name, inst_id: destroyed.append(inst_id),
-                ssh=lambda *a, **k: (0, "да")):
+                ssh=lambda *a, **k: (0, "да")),              mock.patch.object(vecher, "RENT_RETRY_PAUSE", 0):
             results = {}
             vecher.node_up(conf, {"name": "node1", "key": "k"}, set(), set(), results)
         return results["node1"], rented, destroyed
@@ -178,6 +182,28 @@ class SshRefused(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(rented, [100, 101])
         self.assertEqual(destroyed, [100, 101])
+
+
+    def test_empty_search_retried(self):
+        ok, rented, destroyed = self.run_up({"1.2.3.100"}, empty_searches=1)
+        self.assertTrue(ok)
+        self.assertEqual(rented, [100])
+
+    def test_empty_search_counts_as_try(self):
+        ok, rented, destroyed = self.run_up(set(), rent_tries=2, empty_searches=5)
+        self.assertFalse(ok)
+        self.assertEqual(rented, [])
+
+
+class ConfScript(unittest.TestCase):
+    def test_bash_syntax(self):
+        import shutil, subprocess
+        sh = vecher.CONF_SH.format(contract="axm1x", rpc="https://rpc")
+        self.assertEqual(sh.count("echo \"проба в цепочке\""), 2)
+        bash = shutil.which("bash")
+        if bash:
+            r = subprocess.run([bash, "-n"], input=sh, text=True, capture_output=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":
