@@ -13,8 +13,8 @@ twice), or not to check at all.
 
 This project is a working protocol that checks without redoing the
 work. It runs on a public Cosmos chain: a CosmWasm contract holds the
-executors' stake, and Qwen2.5‑7B and Qwen3‑8B on RTX 3090 and 4090 serve
-real requests.
+executors' stake, and Qwen2.5‑7B on RTX 3090 and 4090 serves real
+requests. Qwen3‑8B is measured and packaged, and switching to it is the next step.
 
 ## Verifying is 41× cheaper than generating
 
