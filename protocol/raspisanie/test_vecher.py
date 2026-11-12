@@ -137,5 +137,48 @@ class StakeScript(unittest.TestCase):
         self.assertIn('\\"amount\\":\\"300000\\"', sh)
 
 
+class SshRefused(unittest.TestCase):
+    """Машину, к которой не пускает ssh, уничтожают и берут другую."""
+
+    def run_up(self, ssh_ok, rent_tries=3):
+        from unittest import mock
+        conf = {"rent_tries": rent_tries, "rent_wait_min": 1}
+        rented, destroyed = [], []
+
+        def rent(conf, name, avoid, tried):
+            rented.append(100 + len(rented))
+            return rented[-1]
+
+        def running(conf, name, inst_id, minutes):
+            return {"id": inst_id, "machine_id": inst_id}
+
+        with mock.patch.multiple(
+                vecher,
+                key_hex=lambda path: KEY,
+                load_state=lambda: {},
+                save_instance=lambda name, inst_id: None,
+                rent=rent,
+                wait_running=running,
+                addr=lambda inst: ("1.2.3.%d" % inst["id"], 22, 8081),
+                wait_ssh=lambda ip, port: ip in ssh_ok,
+                destroy=lambda conf, name, inst_id: destroyed.append(inst_id),
+                ssh=lambda *a, **k: (0, "да")):
+            results = {}
+            vecher.node_up(conf, {"name": "node1", "key": "k"}, set(), set(), results)
+        return results["node1"], rented, destroyed
+
+    def test_second_machine_used(self):
+        ok, rented, destroyed = self.run_up({"1.2.3.101"})
+        self.assertTrue(ok)
+        self.assertEqual(rented, [100, 101])
+        self.assertEqual(destroyed, [100])
+
+    def test_gives_up_after_tries(self):
+        ok, rented, destroyed = self.run_up(set(), rent_tries=2)
+        self.assertFalse(ok)
+        self.assertEqual(rented, [100, 101])
+        self.assertEqual(destroyed, [100, 101])
+
+
 if __name__ == "__main__":
     unittest.main()

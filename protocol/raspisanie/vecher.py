@@ -300,27 +300,33 @@ def node_up(conf, node, avoid_machines, tried, results):
                 save_instance(name, None)
             else:
                 avoid_machines.add(inst.get("machine_id"))
+    # Машина, к которой не пускает ssh, бесполезна весь вечер, а деньги
+    # за неё идут: её уничтожают и берут другую в счёт тех же попыток.
+    # Её хост уже в avoid_machines — второй раз его не предложат.
     tries = 0
-    while inst is None and tries < conf["rent_tries"]:
-        tries += 1
-        new_id = rent(conf, name, avoid_machines, tried)
-        if new_id is None:
-            break
-        inst = wait_running(conf, name, new_id, conf["rent_wait_min"])
+    while True:
+        while inst is None and tries < conf["rent_tries"]:
+            tries += 1
+            new_id = rent(conf, name, avoid_machines, tried)
+            if new_id is None:
+                break
+            inst = wait_running(conf, name, new_id, conf["rent_wait_min"])
+            if inst is None:
+                destroy(conf, name, new_id)
+                save_instance(name, None)
         if inst is None:
-            destroy(conf, name, new_id)
-            save_instance(name, None)
-    if inst is None:
-        log(name, "ОТКАЗ: машины нет")
-        results[name] = False
-        return
+            log(name, "ОТКАЗ: машины нет")
+            results[name] = False
+            return
+        ip, p22, p8081 = addr(inst)
+        if wait_ssh(ip, p22):
+            break
+        log(name, f"ssh {ip}:{p22} не пускает — уничтожаю и беру другую")
+        destroy(conf, name, inst["id"])
+        save_instance(name, None)
+        inst = None
 
-    ip, p22, p8081 = addr(inst)
     endpoint = f"http://{ip}:{p8081}"
-    if not wait_ssh(ip, p22):
-        log(name, f"ОТКАЗ: ssh {ip}:{p22} не пускает")
-        results[name] = False
-        return
     if ssh(ip, p22, RUNNING)[1].endswith("да"):
         log(name, "петля уже работает — не трогаю")
         results[name] = True
