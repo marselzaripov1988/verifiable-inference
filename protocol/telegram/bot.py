@@ -138,6 +138,10 @@ class Config:
         #: Цена вопроса в микро-BARTR. 0 — оплата в BARTR выключена: у BARTR
         #: нет пула, и курс к AXM задаёт владелец бота.
         self.price_bartr = int(env.get("PRICE_BARTR", "0"))
+        #: 1 — показывать ответ сразу, как узел его сдал, с пометкой «не
+        #: проверен». Не прошёл проверку — ответ удаляется, человеку
+        #: сказано почему. 0 — ответ только после вердикта (как раньше).
+        self.early = env.get("EARLY_ANSWER", "0") == "1"
 
 
 MSK = 3 * 3600  # Москва — UTC+3 круглый год
@@ -203,11 +207,23 @@ class Telegram:
         return self._call("getUpdates", offset=offset, timeout=25)
 
     def send(self, chat, text):
-        last = None
-        for part in split_text(text):
-            last = self._call("sendMessage", chat_id=chat, text=part,
-                              disable_web_page_preview="true")["message_id"]
-        return last
+        ids = self.send_all(chat, text)
+        return ids[-1] if ids else None
+
+    def send_all(self, chat, text):
+        """Как send, но номера всех частей: ранний ответ потом удаляется
+        целиком."""
+        return [self._call("sendMessage", chat_id=chat, text=part,
+                           disable_web_page_preview="true")["message_id"]
+                for part in split_text(text)]
+
+    def delete(self, chat, msg_id):
+        """Telegram даёт боту удалить своё сообщение в течение 48 часов."""
+        try:
+            self._call("deleteMessage", chat_id=chat, message_id=msg_id)
+            return True
+        except Exception:
+            return False
 
     def edit(self, chat, msg_id, text):
         try:
@@ -324,6 +340,11 @@ class Store:
             if "paid_unit" not in cols:
                 self.db.execute("ALTER TABLE jobs ADD COLUMN paid_unit TEXT")
                 self.db.execute("ALTER TABLE jobs ADD COLUMN paid INTEGER")
+            # Номера сообщений раннего ответа (EARLY_ANSWER), JSON-список:
+            # первое — заголовок «не проверен», дальше — сам ответ.
+            # Добавлено 13 ноября.
+            if "early" not in cols:
+                self.db.execute("ALTER TABLE jobs ADD COLUMN early TEXT")
             self.db.commit()
 
     def q(self, sql, *args):
@@ -1164,9 +1185,64 @@ class Bot:
                 self.finish(chat, job_id, job, answer)
             elif st == "open" and self.now() - created > self.cfg.open_timeout:
                 self.cancel(chat, job_id)
+            elif (answer is not None and getattr(self.cfg, "early", False)
+                  and not self.early_ids(job_id)):
+                self.show_early(chat, job_id, answer)
+
+    EARLY_HEAD = ("⏳ Задание {id}: ответ ниже ещё НЕ ПРОВЕРЕН — проверка "
+                  "идёт. Если проверка не пройдёт, я удалю ответ и скажу "
+                  "об этом.")
+
+    def early_ids(self, job_id):
+        rows = self.store.q("SELECT early FROM jobs WHERE job_id=?", job_id)
+        return json.loads(rows[0][0]) if rows and rows[0][0] else []
+
+    def show_early(self, chat, job_id, answer):
+        """Ответ сдан, вердикта ещё нет: показать сразу, с пометкой.
+
+        Заголовок — отдельным сообщением: его потом правят на вердикт, не
+        трогая разбиение самого ответа на части.
+        """
+        head = self.api.send(chat, self.EARLY_HEAD.format(id=job_id))
+        body = self.api.send_all(chat, answer)
+        self.store.q("UPDATE jobs SET early=? WHERE job_id=?",
+                     json.dumps([head] + list(body)), job_id)
+
+    def settle_early(self, chat, job_id, guilty, ids):
+        """Вердикт пришёл, а ответ уже показан: поправить заголовок, а
+        непроверенный или негодный ответ — удалить."""
+        head, body = ids[0], ids[1:]
+        if guilty is False:
+            self.api.edit(chat, head, f"✅ Задание {job_id}: ответ ниже "
+                                      f"подтверждён проверяющими.")
+            return
+        gone = all([self.api.delete(chat, m) for m in body])
+        why = ("проверяющие признали его негодным" if guilty is True
+               else "проверки не собрались в срок")
+        self.api.edit(chat, head,
+                      f"❌ Задание {job_id}: ответ "
+                      + ("удалён" if gone else "НЕДЕЙСТВИТЕЛЕН — не "
+                         "полагайтесь на него")
+                      + f": {why}.")
 
     def finish(self, chat, job_id, job, answer):
         g = job.get("guilty")
+        ids = self.early_ids(job_id)
+        if ids:
+            self.settle_early(chat, job_id, g, ids)
+            if g is False:
+                text = (f"✅ Ответ на задание {job_id} подтверждён двумя "
+                        f"независимыми узлами (исполнитель "
+                        f"{job.get('executor')}).")
+                links = self.links(job_id)
+                if links:
+                    text = f"{text}\n\n{links}"
+                self.api.send(chat, text)
+                self.store.q("UPDATE jobs SET done=1 WHERE job_id=?", job_id)
+                self.forget(job_id)
+                return
+            # негодный или без вердикта — дальше обычное сообщение с
+            # возвратом денег; ответа в нём нет и так.
         if g is False:
             if answer is None:
                 text = (f"✅ Задание {job_id}: ответ подтверждён проверяющими, "

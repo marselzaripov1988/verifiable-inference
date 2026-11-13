@@ -8,7 +8,9 @@
     командной строки (`client.submit_message`);
   * **лимит держится**, а не прошедшая сделка его не съедает;
   * **ответ показывается только с вердиктом «подтверждён».** Признанный
-    негодным и закрытый без проверки не показываются вовсе;
+    негодным и закрытый без проверки не показываются вовсе. С
+    EARLY_ANSWER=1 ответ виден сразу с пометкой «не проверен», а без
+    подтверждения — удаляется;
   * **невзятое задание снимается**, и деньги и вопрос возвращаются;
   * **владелец узла узнаёт об обвинении и о молчащем адресе**, а о
     недоступности цепочки — нет: это не новость об узле;
@@ -58,6 +60,13 @@ class Api:
         self.n += 1
         self.sent.append((chat, text))
         return self.n
+
+    def send_all(self, chat, text):
+        return [self.send(chat, p) for p in bot.split_text(text)]
+
+    def delete(self, chat, msg):
+        self.deleted = getattr(self, "deleted", []) + [msg]
+        return not getattr(self, "no_delete", False)
 
     def edit(self, chat, msg, text):
         self.edits.append((chat, msg, text))
@@ -575,6 +584,77 @@ def test_templates():
        == "{q}", "явная настройка сильнее модели")
 
 
+def test_early(tmp):
+    print("### EARLY_ANSWER: ответ сразу, вердикт потом")
+    try:
+        os.environ["EARLY_ANSWER"] = "1"
+        ok(bot.Config({"TG_TOKEN": "t", "CONTRACT": "c", "KEY": "k",
+                       "PROMPT_URI": "u", "EARLY_ANSWER": "1"}).early
+           and not bot.Config({"TG_TOKEN": "t", "CONTRACT": "c", "KEY": "k",
+                               "PROMPT_URI": "u"}).early,
+           "EARLY_ANSWER=1 включает, по умолчанию выключено")
+    finally:
+        os.environ.pop("EARLY_ANSWER", None)
+
+    def answered(b):
+        b.handle(msg(1, "вопрос"))
+        b.chain.jobs[7] = {"state": "answered", "answer_hash": "h",
+                           "_checks": 0}
+        b.tick_jobs()
+
+    b, _, _ = make(os.path.join(tmp, "ok"))
+    b.cfg.early = True
+    answered(b)
+    sent = [t for _, t in b.api.sent]
+    ok(any("НЕ ПРОВЕРЕН" in t for t in sent)
+       and "Сеть проверяет подпись." in sent,
+       "ответ показан до вердикта, с пометкой «не проверен»")
+    n = len(b.api.sent)
+    b.tick_jobs()
+    ok(len(b.api.sent) == n, "второй раз ранний ответ не шлётся")
+    head = b.early_ids(7)[0]
+    b.chain.jobs[7] = {"state": "settled", "answer_hash": "h",
+                       "guilty": False, "executor": NODE, "_checks": 2}
+    b.tick_jobs()
+    ok(any(m == head and "подтверждён" in t for _, m, t in b.api.edits),
+       "подтверждён: заголовок раннего ответа исправлен")
+    last = b.api.sent[-1][1]
+    ok("подтверждён" in last and "Сеть проверяет" not in last
+       and "transactions/FF" in last,
+       "и отдельное сообщение со ссылками, без повтора ответа")
+    ok(not getattr(b.api, "deleted", []), "подтверждённый ответ не удалён")
+    ok(b.store.q("SELECT done, answer FROM jobs WHERE job_id=7") == [(1, None)],
+       "задание закрыто, ответ из базы стёрт")
+
+    for guilty, word in ((True, "негодным"), (None, "без вердикта")):
+        b, _, _ = make(os.path.join(tmp, f"g{guilty}"))
+        b.cfg.early = True
+        answered(b)
+        ids = b.early_ids(7)
+        b.chain.jobs[7] = {"state": "settled", "answer_hash": "h",
+                           "guilty": guilty}
+        b.tick_jobs()
+        ok(b.api.deleted == ids[1:], f"guilty={guilty}: ответ удалён")
+        ok(any(m == ids[0] and "удалён" in t for _, m, t in b.api.edits),
+           f"guilty={guilty}: заголовок говорит, что ответ удалён")
+        ok(word in b.api.sent[-1][1], f"guilty={guilty}: обычное сообщение "
+                                      f"о вердикте и возврате")
+
+    b, _, _ = make(os.path.join(tmp, "nodel"))
+    b.cfg.early = True
+    answered(b)
+    b.api.no_delete = True
+    b.chain.jobs[7] = {"state": "settled", "answer_hash": "h", "guilty": True}
+    b.tick_jobs()
+    ok(any("НЕДЕЙСТВИТЕЛЕН" in t for _, _, t in b.api.edits),
+       "удалить не вышло (48 ч) — заголовок предупреждает")
+
+    b, _, _ = make(os.path.join(tmp, "off"))
+    answered(b)
+    ok(not any("Сеть проверяет" in t for t in texts(b)),
+       "без EARLY_ANSWER до вердикта ответа нет, как раньше")
+
+
 def test_split():
     parts = bot.split_text("строка\n" * 1000, limit=100)
     ok(all(len(p) <= 100 for p in parts) and "".join(parts) == "строка\n" * 1000,
@@ -589,7 +669,7 @@ if __name__ == "__main__":
                   test_answer_unreachable, test_limits, test_hours, test_gpu,
                   test_open_timeout,
                   test_nodes, test_prompt_server, test_privacy,
-                  test_signed_prompt, test_pay):
+                  test_signed_prompt, test_pay, test_early):
             t(tempfile.mkdtemp(dir=tmp))
         test_split()
         test_templates()
