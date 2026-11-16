@@ -206,5 +206,70 @@ class ConfScript(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class Down(unittest.TestCase):
+    """После часа работы машина уничтожается, а не останавливается:
+    за диск остановленной vast.ai берёт деньги круглые сутки."""
+
+    def test_destroyed_and_forgotten(self):
+        from unittest import mock
+        calls, saved, destroyed = [], [], []
+        with mock.patch.multiple(
+                vecher,
+                load_state=lambda: {"node1": {"instance": 7}},
+                show=lambda conf, i: {"actual_status": "running"},
+                addr=lambda inst: ("1.2.3.4", 22, 8081),
+                ssh=lambda *a, **k: (0, "ключ стёрт"),
+                vast=lambda conf, *a, **k: calls.append(a) or (0, ""),
+                destroy=lambda conf, name, i: destroyed.append(i),
+                save_instance=lambda name, i: saved.append((name, i))):
+            vecher.node_down({}, {"name": "node1"})
+        self.assertEqual(destroyed, [7])
+        self.assertEqual(saved, [("node1", None)])
+        self.assertFalse([a for a in calls if "stop" in a], "stop не вызывается")
+
+
+class Balance(unittest.TestCase):
+    def conf(self, tmp, env="TG_TOKEN=t\nADMINS=11, 22\n"):
+        p = Path(tmp) / "env"
+        p.write_text(env, encoding="utf-8")
+        return {"balance_alert": 5.0, "evening_cost": 2.5, "tg_env": str(p)}
+
+    def run_check(self, user, env="TG_TOKEN=t\nADMINS=11, 22\n"):
+        from unittest import mock
+        sent = []
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.multiple(
+                vecher, vast_json=lambda conf, *a: user,
+                notify=lambda conf, text: sent.append(text) or True):
+            conf = self.conf(tmp, env)
+            return vecher.check_balance(conf), sent, conf
+
+    def test_debt_counts(self):
+        left, sent, _ = self.run_check({"credit": 0, "balance": -2.76})
+        self.assertAlmostEqual(left, -2.76)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("не поднимет", sent[0])
+
+    def test_low_warns_with_nights(self):
+        left, sent, _ = self.run_check({"credit": 4.0, "balance": 0})
+        self.assertIn("1 вечер", sent[0])
+
+    def test_enough_is_silent(self):
+        left, sent, _ = self.run_check({"credit": 20.0, "balance": 0})
+        self.assertEqual((left, sent), (20.0, []))
+
+    def test_up_refuses_without_money(self):
+        from unittest import mock
+        with mock.patch.multiple(vecher, check_balance=lambda conf: -1.0,
+                                 node_up=lambda *a: self.fail("аренда без денег")):
+            self.assertEqual(vecher.cmd_up({"nodes": [{"name": "node1"}]}), 1)
+
+    def test_tg_conf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = self.conf(tmp, "# x\nTG_TOKEN=abc\nADMINS=11,-22\nOTHER=1\n")
+            self.assertEqual(vecher.tg_conf(conf), ("abc", [11, -22]))
+            conf["tg_env"] = str(Path(tmp) / "нет")
+            self.assertEqual(vecher.tg_conf(conf), (None, []))
+
+
 if __name__ == "__main__":
     unittest.main()

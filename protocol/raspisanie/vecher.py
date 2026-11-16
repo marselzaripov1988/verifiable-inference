@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Вечерние часы сети: три узла на RTX 4090 с 19:00 до 21:00 по Москве.
+"""Вечерние часы сети: три узла на RTX 4090 с 19:00 до 20:00 по Москве.
 
 Запускается по расписанию на сервере (cron, см. vecher.cron):
 
@@ -8,8 +8,10 @@
                               запустить start.sh и дождаться петли
     vecher.py down            дождаться, пока незакрытые задания закроются
                               (не дольше drain_min), стереть ключи с машин
-                              и ОСТАНОВИТЬ машины (диск с образом остаётся)
-    vecher.py down --no-drain то же без ожидания — страховка в 21:30
+                              и УНИЧТОЖИТЬ машины
+    vecher.py down --no-drain то же без ожидания — страховка в 20:30
+    vecher.py balance         сколько денег на vast.ai; мало — сказать
+                              админам бота в Telegram (это же делает up)
     vecher.py status          что с машинами и залогами
     vecher.py stake           внести залог тем узлам, у которых его нет.
                               Подпись на каждый узел; вручную, не по cron
@@ -17,12 +19,13 @@
 Только стандартная библиотека и CLI vastai. Ключи узлов лежат на сервере
 (keys/nodeN.key, права 600) и уезжают на машину по stdin ssh — в
 командной строке и в журнале их нет. При `down` ключ стирается с машины
-ДО остановки: у остановленной машины диск остаётся у хозяина карты.
+ДО уничтожения машины.
 
 Почему так, а не иначе:
-- Остановка, а не уничтожение: следующий запуск не качает образ заново.
-  Если карту за это время заняли, машина не стартует — тогда она
-  уничтожается и арендуется другая 4090 (не дороже max_dph).
+- Уничтожение, а не остановка (с 16 ноября): за диск остановленной машины
+  vast.ai берёт деньги круглые сутки. 12–15 ноября диски простаивавших
+  машин стоили ≈ $9,4 — две трети того, что стоили сами карты. Новая
+  аренда каждый вечер — плюс 5–10 минут на образ и модель, это дешевле.
 - Залог не снимается: выключенный узел заданий не берёт, а брошенное
   задание контракт возвращает в очередь без наказания (release_job).
 - Перед остановкой ждём незакрытые задания: исполнитель без проверяющих
@@ -38,6 +41,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -78,6 +82,12 @@ def load_conf():
     conf.setdefault("ready_wait_min", 25)
     conf.setdefault("drain_min", 10)
     conf.setdefault("rent_tries", 3)
+    #: Ниже этой суммы на vast.ai — предупредить админов бота, $.
+    conf.setdefault("balance_alert", 5.0)
+    #: Сколько примерно стоит один вечер, $: для «хватит на N вечеров».
+    conf.setdefault("evening_cost", 2.5)
+    #: Файл окружения бота: оттуда TG_TOKEN и ADMINS для предупреждений.
+    conf.setdefault("tg_env", "/opt/vi-bot/env")
     return conf
 
 
@@ -413,7 +423,78 @@ def ensure_conformance(conf, name, ip, p22):
     return code == 0
 
 
+# ------------------------------------------------------------------ деньги
+
+def tg_conf(conf):
+    """TG_TOKEN и ADMINS из файла окружения бота; (None, []) — если нет."""
+    try:
+        env = dict(line.split("=", 1) for line in
+                   Path(conf["tg_env"]).read_text(encoding="utf-8").splitlines()
+                   if "=" in line and not line.lstrip().startswith("#"))
+    except OSError:
+        return None, []
+    token = env.get("TG_TOKEN", "").strip() or None
+    return token, [int(x) for x in re.findall(r"-?\d+", env.get("ADMINS", ""))]
+
+
+def notify(conf, text):
+    """Сообщение админам бота. Не вышло — только запись в журнал."""
+    token, chats = tg_conf(conf)
+    if not token or not chats:
+        log("telegram", "некому сказать: нет TG_TOKEN или ADMINS")
+        return False
+    sent = 0
+    for chat in chats:
+        data = urllib.parse.urlencode({"chat_id": chat, "text": text}).encode()
+        try:
+            urllib.request.urlopen(urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage", data=data),
+                timeout=20).read()
+            sent += 1
+        except Exception as e:
+            log("telegram", f"не отправлено в {chat}: {type(e).__name__}")
+    return sent > 0
+
+
+def money_left(conf):
+    """Сколько можно тратить, $. Долг (отрицательный balance) вычитается."""
+    u = vast_json(conf, "show", "user")
+    credit = float(u.get("credit") or 0)
+    balance = float(u.get("balance") or 0)
+    return credit + min(balance, 0.0)
+
+
+def check_balance(conf):
+    """Деньги на vast.ai: записать и, если мало, сказать админам.
+
+    Возвращает остаток или None, если vast.ai не ответил.
+    """
+    try:
+        left = money_left(conf)
+    except Exception as e:
+        log("баланс", f"не прочитан: {e}")
+        return None
+    nights = int(max(left, 0) // conf["evening_cost"])
+    log("баланс", f"${left:.2f} — примерно на {nights} вечер(а/ов)")
+    if left < conf["balance_alert"]:
+        notify(conf, f"⚠️ На vast.ai осталось ${left:.2f} — "
+                     + ("узлы сеть не поднимет. " if left <= 0 else
+                        f"хватит примерно на {nights} вечер(а/ов) "
+                        f"(вечер ≈ ${conf['evening_cost']:.1f}). ")
+                     + "Пополнить: https://cloud.vast.ai/billing/")
+    return left
+
+
+def cmd_balance(conf):
+    left = check_balance(conf)
+    return 0 if left is not None and left >= conf["balance_alert"] else 1
+
+
 def cmd_up(conf):
+    left = check_balance(conf)
+    if left is not None and left <= 0:
+        log("итог", "денег на vast.ai нет — узлы не поднимаю")
+        return 1
     avoid, tried, results = set(), set(), {}
     threads = [threading.Thread(target=node_up, args=(conf, n, avoid, tried, results))
                for n in conf["nodes"]]
@@ -503,8 +584,8 @@ def node_down(conf, node):
             log(name, out[-40:] or f"ssh код {code}")
         except subprocess.TimeoutExpired:
             log(name, "ssh не ответил — ключ на машине мог остаться")
-    code, out = vast(conf, "stop", "instance", inst_id)
-    log(name, f"остановка {inst_id}: {out[-120:]}")
+    destroy(conf, name, inst_id)
+    save_instance(name, None)
 
 
 def cmd_down(conf, no_drain):
@@ -571,7 +652,7 @@ def cmd_stake(conf):
 
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    p.add_argument("what", choices=("up", "down", "status", "stake"))
+    p.add_argument("what", choices=("up", "down", "status", "stake", "balance"))
     p.add_argument("--no-drain", action="store_true")
     a = p.parse_args(argv)
     conf = load_conf()
@@ -582,6 +663,8 @@ def main(argv=None):
         return cmd_down(conf, a.no_drain)
     if a.what == "stake":
         return cmd_stake(conf)
+    if a.what == "balance":
+        return cmd_balance(conf)
     return cmd_status(conf)
 
 
