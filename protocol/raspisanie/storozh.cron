@@ -1,0 +1,9 @@
+# /etc/cron.d/storozh — сторож машин vast.ai: раз в 5 минут.
+# Пишет админам бота в Telegram: поднялась / остановилась, поднялись ли
+# узлы к 19:05 и остановились ли к 20:40 (МСК), и раз в час — о машинах,
+# работающих дольше 3 часов. Настройки — раздел "storozh" в vecher.json.
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+VECHER_HOME=/opt/vecher
+
+*/5 * * * * root flock -n /run/storozh.lock /usr/bin/python3 /opt/vecher/storozh.py >> /var/log/storozh.log 2>&1
