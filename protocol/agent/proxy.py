@@ -49,6 +49,7 @@ import client    # noqa: E402
 import delivery  # noqa: E402
 import sign      # noqa: E402
 import tx        # noqa: E402
+import wallet    # noqa: E402
 # Раздача текстов узлам и шаблоны диалога — те же, что у бота: две копии
 # одного правила допуска разошлись бы, и одна из них отдавала бы лишнее.
 from bot import CHAT_TEMPLATES, serve_prompts, template_for  # noqa: E402
@@ -76,11 +77,19 @@ class Config:
                 raise SystemExit(f"ОТКАЗ: не задан {k} (см. README.md)")
             return v
         self.contract = need("CONTRACT")
-        #: Имя ключа агента в связке axmd: им подписываются сделки.
-        self.key = need("KEY")
-        #: Файл с тем же ключом (64 hex): подпись запросов к узлам и
-        #: расшифровка ответов. Должен давать тот же адрес, что KEY.
+        #: Файл с ключом агента (64 hex, `keytool.py`): подпись сделок,
+        #: подпись запросов к узлам и расшифровка ответов.
         self.sign_key = need("SIGN_KEY")
+        #: Чем подписывать сделки: `python` — сам прокси, ключом SIGN_KEY,
+        #: через LCD (ничего ставить не нужно); `axmd` — утилитой цепочки,
+        #: ключом KEY из её связки.
+        self.signer = env.get("SIGNER", "python")
+        if self.signer not in SIGNERS:
+            raise SystemExit(f"SIGNER: одно из {', '.join(SIGNERS)}, а не "
+                             f"{self.signer!r}")
+        #: Имя ключа в связке axmd. Нужно только при SIGNER=axmd и должно
+        #: давать тот же адрес, что SIGN_KEY.
+        self.key = need("KEY") if self.signer == "axmd" else env.get("KEY")
         #: Адрес, по которому УЗЛЫ возьмут текст запроса. Снаружи, а не
         #: localhost: исполнитель стоит на чужой машине.
         self.prompt_uri = need("PROMPT_URI").rstrip("/")
@@ -129,6 +138,7 @@ class Config:
 
 
 MODES = ("settled", "answer")
+SIGNERS = ("python", "axmd")
 
 
 # --- хранилище ------------------------------------------------------------
@@ -612,14 +622,24 @@ def make_handler(proxy):
     return H
 
 
+def make_sender(cfg, key):
+    """Отправитель сделок. По умолчанию — свой, без axmd: агенту хватает
+    ключа и Python."""
+    if cfg.signer == "python":
+        return wallet.Wallet(cfg.contract, key, rest=cfg.rest,
+                             chain_id=cfg.chain_id,
+                             gas_prices=cfg.gas_prices)
+    return tx.Axmd(cfg.contract, cfg.key, chain_id=cfg.chain_id,
+                   node=cfg.node, home=cfg.home, keyring=cfg.keyring,
+                   gas_prices=cfg.gas_prices)
+
+
 def main():
     cfg = Config()
     store = Store(cfg.db)
-    sender = tx.Axmd(cfg.contract, cfg.key, chain_id=cfg.chain_id,
-                     node=cfg.node, home=cfg.home, keyring=cfg.keyring,
-                     gas_prices=cfg.gas_prices)
     key = sign.load_key(cfg.sign_key)
     mine = sign.address(sign.pubkey(key))
+    sender = make_sender(cfg, key)
     if mine != sender.address():
         raise SystemExit(f"ОТКАЗ: SIGN_KEY даёт {mine}, а ключ {cfg.key} — "
                          f"{sender.address()}. Узлы отдают ответ только "
