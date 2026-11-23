@@ -1,0 +1,65 @@
+# Собрать образ прокси агента и выложить в GHCR.
+#
+# Образ маленький (Python и код протокола), но собирается здесь, а не на
+# машине автора: так в GHCR лежит ровно то, что в репозитории на этом
+# коммите. Тесты подписи и прокси прогоняются внутри сборки (Dockerfile),
+# а перед выкладкой — три отказа при запуске.
+name: образ прокси агента
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'agent-image-v*'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # Два сегмента имени: GHCR в пространстве пользователя не принимает три
+  # (см. node-image.yml).
+  IMAGE: ghcr.io/${{ github.repository_owner }}/verifiable-inference-agent
+
+jobs:
+  obraz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: собрать
+        run: docker build -f protocol/agent/Dockerfile -t "$IMAGE:${{ github.sha }}" .
+
+      - name: отказы при запуске
+        # Прокси обязан отказать до первой сделки, а не на первом запросе.
+        run: |
+          probe() {
+            name="$1"; want="$2"; shift 2
+            out="$(docker run --rm "$@" "$IMAGE:${{ github.sha }}" 2>&1 || true)"
+            case "$out" in
+              *"$want"*) echo "ok   $name" ;;
+              *) echo "FAIL $name"; echo "$out" | tail -5; exit 1 ;;
+            esac
+          }
+          probe "без CONTRACT не стартует"        "не задан CONTRACT"
+          probe "без PROMPT_URI не стартует"      "не задан PROMPT_URI" -e CONTRACT=axm1xxx
+          probe "API наружу без токена — отказ"   "без API_TOKEN"       -e CONTRACT=axm1xxx -e PROMPT_URI=http://1.2.3.4:8090
+
+      - name: выложить
+        # Версия из тега git: agent-image-v1 -> v1. Ручной запуск выкладывает
+        # только образ с именем коммита.
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ github.sha }}"
+          ver=""
+          case "$GITHUB_REF" in
+            refs/tags/agent-image-v*) ver="${GITHUB_REF_NAME#agent-image-}" ;;
+          esac
+          if [ -n "$ver" ]; then
+            docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:$ver"
+            docker push "$IMAGE:$ver"
+          fi
+          echo "digest, который можно назвать в инструкции:"
+          docker inspect --format '{{index .RepoDigests 0}}' "$IMAGE:${{ github.sha }}" || true

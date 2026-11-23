@@ -78,7 +78,7 @@ docker run -d --gpus all --name node -p 8081:8081 \
 | `protocol/` | контракт CosmWasm, демоны исполнителя и проверяющего, правило вердикта |
 | `gateway/` | шлюз этапа 1: приём запроса, оплата, отдача ответа, без проверок |
 | `protocol/cabinet/` | кабинет владельца узла — мини-приложение Telegram: статус, залог, заработок, подключение новой карты; сделки подписывает кошелёк Axiome |
-| `protocol/agent/` | прокси для автономных агентов: OpenAI-совместимый API, агент платит своим кошельком в AXM, ответ — с вердиктом проверяющих |
+| `protocol/agent/` | прокси для автономных агентов: OpenAI-совместимый API, агент платит своим кошельком в AXM, ответ — с вердиктом проверяющих. Сделки подписывает сам, без `axmd`; запускается одним образом Docker |
 | `research/inference-determinism/` | замеры, которыми получен порог, вместе с сохранёнными векторами |
 | `research/migrate-rollback/` | опыт на девнете: перенос состояния сохраняет всё, откат на прежний код невозможен |
 | `research/axiome-devnet/` | стенд с исправленным узлом Axiome: три правки, проверенные исполнением, и отрицательный контроль на выпуске |
@@ -92,6 +92,7 @@ python protocol/daemon/test_canon.py           # канон кодировани
 python protocol/daemon/test_daemons.py         # демоны
 python protocol/daemon/test_loop.py            # петля узла
 python protocol/daemon/test_client.py          # заказчик
+python protocol/daemon/test_wallet.py          # подпись сделок без axmd
 python protocol/agent/test_proxy.py            # прокси агентов
 python protocol/cabinet/test_cabinet.py        # кабинет узла
 python -m unittest discover -s gateway/tests   # шлюз

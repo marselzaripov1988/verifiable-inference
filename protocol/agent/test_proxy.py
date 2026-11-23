@@ -351,6 +351,25 @@ def run(tmp):
        "посторонний — 403")
     srv.shutdown()
 
+    # --- чем подписываются сделки ----------------------------------------
+    base = {"CONTRACT": "axm1c", "SIGN_KEY": "k", "PROMPT_URI": "http://x"}
+    cfg = proxy.Config(base)
+    ok(cfg.signer == "python" and cfg.key is None,
+       "по умолчанию подпись без axmd, KEY не нужен")
+    snd = proxy.make_sender(cfg, bytes.fromhex("11" * 32))
+    ok(isinstance(snd, proxy.wallet.Wallet) and snd.address() == node,
+       "отправитель — свой, адрес из SIGN_KEY")
+    try:
+        proxy.Config(dict(base, SIGNER="axmd"))
+        ok(False, "SIGNER=axmd без KEY — отказ при запуске")
+    except SystemExit:
+        ok(True, "SIGNER=axmd без KEY — отказ при запуске")
+    try:
+        proxy.Config(dict(base, SIGNER="ledger"))
+        ok(False, "неизвестный SIGNER — отказ")
+    except SystemExit:
+        ok(True, "неизвестный SIGNER — отказ")
+
 
 if __name__ == "__main__":
     raise SystemExit(main())

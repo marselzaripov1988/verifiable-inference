@@ -25,29 +25,75 @@
 | Что | Зачем |
 |---|---|
 | кошелёк агента `axm1…` с AXM | из него оплачиваются задания и газ |
-| тот же ключ в связке `axmd` (`KEY`) | подпись сделок (`axmd` v2.2.1, как в образе узла) |
-| тот же ключ файлом, 64 hex (`SIGN_KEY`) | подпись запросов к узлам: связку с ответом узел отдаёт только заказчику |
+| ключ этого кошелька файлом, 64 hex (`SIGN_KEY`) | подпись сделок и запросов к узлам: связку с ответом узел отдаёт только заказчику |
 | адрес, видимый снаружи (`PROMPT_URI`) | по нему узлы забирают текст запроса |
 
-Прокси сам проверяет, что `SIGN_KEY` и `KEY` дают один адрес, иначе не
-запускается.
+Больше ничего: ни `axmd`, ни `libwasmvm`, ни связки ключей. Сделки
+подписывает сам прокси (`protocol/daemon/wallet.py`, `SIGN_MODE_DIRECT`)
+и отправляет через LCD. Только стандартная библиотека Python 3.10+.
 
-## Запуск
+## Ключ
 
 ```sh
-axmd keys import-hex agent <64 hex> --keyring-backend test   # один раз
-echo -n '<64 hex>' > agent.key && chmod 600 agent.key
+python3 protocol/agent/keytool.py new agent.key        # новый кошелёк
+python3 protocol/agent/keytool.py mnemonic agent.key   # из фразы Axiome Wallet
+python3 protocol/agent/keytool.py address agent.key    # какой у ключа адрес
+```
 
+Команда печатает адрес `axm1…`: на него нужно перевести AXM. Фраза
+читается со входа, не из аргументов, и в историю оболочки не попадает.
+Путь — `m/44'/546'/0'/0/0` (монета Axiome 546), другой задаётся через
+`HD_PATH`. **Сверьте адрес с Axiome Wallet:** опечатка во фразе даёт не
+ошибку, а другой, пустой кошелёк.
+
+Отдельный кошелёк под агента лучше общего: на нём лежит ровно столько,
+сколько агенту разрешено потратить, а `MAX_SPEND_DAY` ограничивает траты
+в сутки.
+
+## Запуск одной командой (Docker)
+
+```sh
+docker build -f protocol/agent/Dockerfile -t vi-agent .   # из корня репозитория
+
+TOKEN=$(openssl rand -hex 16); echo "API_TOKEN агента: $TOKEN"   # сохранить для агента
+
+docker run -d --name vi-agent --restart unless-stopped \
+  -v $PWD/agent.key:/key/agent.key:ro -v vi-agent:/data \
+  -p 127.0.0.1:8088:8088 -p 8090:8090 \
+  -e CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r \
+  -e PROMPT_URI=http://ВНЕШНИЙ-АДРЕС:8090 \
+  -e API_TOKEN=$TOKEN \
+  -e MAX_SPEND_DAY=1000000 \
+  vi-agent
+```
+
+Образ собирается и выкладывается в GHCR тегом `agent-image-v*`
+(`.github/workflows/agent-image.yml`). После первой выкладки вместо
+`docker build` достаточно `ghcr.io/marselzaripov1988/verifiable-inference-agent:v1`.
+
+- Порт `8088` — API агента, открыт только на этой машине.
+- Порт `8090` — тексты запросов для узлов, должен быть виден снаружи.
+- В контейнере API слушает все адреса, поэтому `API_TOKEN` обязателен:
+  без него прокси не стартует. Агент передаёт токен как `api_key`
+  клиента OpenAI.
+- База и тексты лежат в томе `/data`.
+
+**Признак:** `docker logs vi-agent` показывает строки
+`агент axm1…, реестр …, модель …; запрос стоит …` и `на кошельке N uaxm`,
+а `docker inspect -f '{{.State.Health.Status}}' vi-agent` — `healthy`.
+
+## Запуск без Docker
+
+```sh
 CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r \
-KEY=agent SIGN_KEY=./agent.key \
+SIGN_KEY=./agent.key \
 PROMPT_URI=http://ВНЕШНИЙ-АДРЕС:8090 \
 MAX_SPEND_DAY=1000000 \
 python3 -u protocol/agent/proxy.py
 ```
 
-Если в вашей версии `axmd` нет команды `keys import-hex`, ключ
-восстанавливается из сид-фразы командой `axmd keys add agent --recover`.
-Тип монеты для Axiome 546.
+Прежний путь через `axmd` остался: `SIGNER=axmd KEY=<имя в связке>`.
+Прокси проверяет, что `KEY` и `SIGN_KEY` дают один адрес.
 
 **Признак, что прокси поднялся:** в выводе есть строка
 `агент axm1…, реестр …, модель …; запрос стоит …`, а `GET /healthz`
@@ -56,7 +102,8 @@ python3 -u protocol/agent/proxy.py
 | Переменная | По умолчанию | Что это |
 |---|---|---|
 | `CONTRACT` | — | реестр. Его расчёт обязан быть `{"native":"uaxm"}`, иначе прокси отказывает |
-| `KEY`, `SIGN_KEY` | — | ключ агента: имя в связке `axmd` и файл |
+| `SIGN_KEY` | — | файл с ключом агента (64 hex) |
+| `SIGNER` | `python` | `python` — подпись самим прокси через LCD; `axmd` — утилитой цепочки, тогда нужен и `KEY` (имя в связке) |
 | `PROMPT_URI`, `PROMPT_PORT` | —, `8090` | откуда узлы берут текст запроса (снаружи) и какой порт для этого слушается |
 | `API_HOST`, `API_PORT` | `127.0.0.1`, `8088` | API для агента |
 | `API_TOKEN` | пусто | `Authorization: Bearer …`. Обязателен, если API открыт не на localhost |
@@ -67,7 +114,10 @@ python3 -u protocol/agent/proxy.py
 | `WAIT_TIMEOUT` | `1800` | сколько держать HTTP-запрос; дальше 504 с номером задания |
 | `MAX_CHARS` | `8000` | предел длины запроса |
 | `CHAT_TEMPLATE` | `auto` | шаблон диалога по модели реестра |
-| `REST`, `NODE`, `CHAIN_ID`, `GAS_PRICES`, `AXMD_HOME`, `KEYRING_BACKEND`, `DB`, `PROMPTS_DIR` | Axiome | цепочка и файлы |
+| `REST` | `https://axm-lcd.trickle.pro` | LCD: чтение цепочки, симуляция газа, отправка сделок |
+| `GAS_PRICES` | `0.0025uaxm` | цена газа; запрос обходится примерно в 400–500 uaxm газа сверх цены |
+| `CHAIN_ID`, `DB`, `PROMPTS_DIR` | `axiome-1`, `./agent.sqlite`, `./prompts` | сеть и файлы. Сеть LCD сверяется перед первой подписью |
+| `NODE`, `AXMD_HOME`, `KEYRING_BACKEND` | Axiome | только для `SIGNER=axmd` |
 
 ## Как агент вызывает прокси
 
@@ -114,25 +164,6 @@ print(r.model_extra["verification"])   # job_id, verdict, executor, txhash, paid
   хэшами в цепочке, а сверить половину ответа нельзя.
 - **Подсчёта токенов нет:** `usage` нулевой, плата фиксирована за
   задание (`PRICE`).
-- **Подпись без `axmd` пока не сделана.** Сделки подписывает `axmd`, как
-  у узла и у бота. Если агенту нужна поставка без внешних бинарников,
-  это следующий шаг: подпись и отправка `MsgExecuteContract` на чистом
-  Python.
-
-## Проверка
-
-```sh
-python3 protocol/agent/test_proxy.py
-```
-
-Тест поднимает настоящий HTTP-сервер прокси на подставной цепочке и
-проверяет:
-
-- оплату монетой uaxm и выкладку текста до сделки;
-- шаблон диалога;
-- что негодный и непроверенный ответы не отдаются;
-- режим `answer`;
-- снятие невзятого задания;
-- потолок трат;
-- токен API;
-- допуск узлов к тексту по подписи.
+- **Ключ лежит у прокси открытым файлом.** Иначе агент не автономен:
+  подписывать каждую сделку некому. Риск ограничен отдельным кошельком и
+  `MAX_SPEND_DAY`.
