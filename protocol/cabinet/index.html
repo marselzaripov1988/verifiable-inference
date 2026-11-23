@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Кабинет узла</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+:root {
+  --bg: var(--tg-theme-bg-color, #ffffff);
+  --bg2: var(--tg-theme-secondary-bg-color, #f2f2f7);
+  --text: var(--tg-theme-text-color, #111111);
+  --hint: var(--tg-theme-hint-color, #8a8a8e);
+  --link: var(--tg-theme-link-color, #2a7ae2);
+  --btn: var(--tg-theme-button-color, #2a7ae2);
+  --btn-text: var(--tg-theme-button-text-color, #ffffff);
+  --ok: #2e9e5b;
+  --bad: #d9443a;
+  --warn: #d88a1c;
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-tg]) {
+    --bg: #1c1c1e; --bg2: #2c2c2e; --text: #f2f2f7; --hint: #98989f;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg2); color: var(--text);
+  font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+main { max-width: 640px; margin: 0 auto; padding: 12px 16px 32px; }
+h1 { font-size: 20px; margin: 4px 0 2px; }
+h2 { font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+     color: var(--hint); margin: 20px 4px 8px; }
+.sub { color: var(--hint); font-size: 13px; margin: 0 0 12px; }
+.tabs { display: flex; gap: 6px; background: var(--bg); padding: 4px; border-radius: var(--radius); margin: 12px 0; }
+.tabs button { flex: 1; border: 0; background: none; color: var(--text); padding: 8px; border-radius: 9px; font: inherit; cursor: pointer; }
+.tabs button.on { background: var(--btn); color: var(--btn-text); }
+.card { background: var(--bg); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
+.card.click { cursor: pointer; }
+.row { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.addr { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; word-break: break-all; }
+.muted { color: var(--hint); font-size: 13px; }
+.big { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.badge { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--bg2); white-space: nowrap; }
+.badge.ok { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+.badge.bad { background: color-mix(in srgb, var(--bad) 18%, transparent); color: var(--bad); }
+.badge.warn { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.steps { list-style: none; padding: 0; margin: 0; }
+.steps li { display: flex; gap: 10px; padding: 7px 0; border-top: 1px solid var(--bg2); }
+.steps li:first-child { border-top: 0; }
+.dot { width: 20px; height: 20px; flex: none; border-radius: 50%; display: grid; place-items: center; font-size: 12px; color: #fff; background: var(--hint); }
+.dot.ok { background: var(--ok); }
+.dot.bad { background: var(--bad); }
+input, select {
+  width: 100%; font: inherit; color: var(--text); background: var(--bg2);
+  border: 1px solid transparent; border-radius: 10px; padding: 10px 12px; margin: 4px 0 8px;
+}
+input:focus, select:focus { outline: none; border-color: var(--btn); }
+button.main, button.sec {
+  width: 100%; border: 0; border-radius: 10px; padding: 11px; font: inherit; font-weight: 600; cursor: pointer; margin-top: 6px;
+}
+button.main { background: var(--btn); color: var(--btn-text); }
+button.sec { background: var(--bg2); color: var(--link); }
+button.link { border: 0; background: none; color: var(--link); font: inherit; padding: 0; cursor: pointer; }
+pre { background: var(--bg2); border-radius: 10px; padding: 10px; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin: 6px 0; max-height: 180px; overflow: auto; }
+.action { border-top: 1px solid var(--bg2); padding-top: 10px; margin-top: 10px; }
+details summary { cursor: pointer; color: var(--link); font-size: 13px; margin-top: 6px; }
+.err { color: var(--bad); font-size: 13px; }
+.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--text); color: var(--bg);
+  padding: 8px 14px; border-radius: 99px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+.toast.on { opacity: .92; }
+.hidden { display: none; }
+.reg { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.empty { text-align: center; color: var(--hint); padding: 24px 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Узлы проверяемого инференса</h1>
+  <p class="sub">Подключите видеокарту: она отвечает на запросы ИИ-агентов и проверяет чужие ответы. Выплаты приходят прямо на ваш кошелёк из контракта.</p>
+
+  <div class="tabs" id="tabs">
+    <button data-tab="mine" class="on">Мои узлы</button>
+    <button data-tab="connect">Подключить</button>
+  </div>
+
+  <section id="mine"></section>
+  <section id="connect" class="hidden"></section>
+  <section id="detail" class="hidden"></section>
+</main>
+<div class="toast" id="toast"></div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg && tg.initData) { document.documentElement.dataset.tg = "1"; tg.ready(); tg.expand(); }
+
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const short = a => a ? a.slice(0, 10) + "…" + a.slice(-6) : "";
+let registries = [], guide = "", nodes = [], view = "mine";
+
+async function api(method, path) {
+  const r = await fetch(path, { method, headers: { "X-Telegram-Init-Data": tg ? tg.initData : "" } });
+  const d = await r.json().catch(() => ({ error: "ответ сервера не разобран" }));
+  if (!r.ok) throw new Error(d.error || ("ошибка " + r.status));
+  return d;
+}
+
+function toast(t) {
+  const el = $("#toast"); el.textContent = t; el.classList.add("on");
+  setTimeout(() => el.classList.remove("on"), 1600);
+}
+async function copy(text, what) {
+  try { await navigator.clipboard.writeText(text); }
+  catch (e) {
+    const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta);
+    ta.select(); document.execCommand("copy"); ta.remove();
+  }
+  if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+  toast(what + " скопирована");
+}
+document.addEventListener("click", e => {
+  const b = e.target.closest("[data-copy]");
+  if (b) copy(b.dataset.copy, b.dataset.what || "Строка");
+});
+
+function show(name) {
+  view = name;
+  for (const s of ["mine", "connect", "detail"]) $("#" + s).classList.toggle("hidden", s !== name);
+  for (const b of document.querySelectorAll("#tabs button")) b.classList.toggle("on", b.dataset.tab === name);
+  $("#tabs").classList.toggle("hidden", name === "detail");
+  if (tg) name === "detail" ? tg.BackButton.show() : tg.BackButton.hide();
+  window.scrollTo(0, 0);
+}
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => show(b.dataset.tab));
+if (tg) tg.BackButton.onClick(() => { show("mine"); renderMine(); });
+
+// --- действия: строка для Axiome Connect и команда axmd -------------------
+
+async function actionBlock(el, registry, kind, args = {}) {
+  el.innerHTML = `<p class="muted">Готовлю сделку…</p>`;
+  try {
+    const q = new URLSearchParams({ registry, kind, ...args });
+    const a = await api("GET", "/api/action?" + q);
+    let h = `<div><b>${esc(a.title)}</b></div>`;
+    if (a.note) h += `<p class="muted">${esc(a.note)}</p>`;
+    if (a.axiomesign) {
+      h += `<button class="main" data-copy="${esc(a.axiomesign)}" data-what="Строка Axiome Connect">Скопировать строку для Axiome Wallet</button>
+            <p class="muted">Axiome Wallet → Axiome Connect → вставить строку → подтвердить.</p>
+            <details><summary>То же командой axmd</summary><pre>${esc(a.axmd)}</pre>
+            <button class="sec" data-copy="${esc(a.axmd)}" data-what="Команда">Скопировать команду</button></details>`;
+    } else {
+      h += `<pre>${esc(a.axmd)}</pre><button class="main" data-copy="${esc(a.axmd)}" data-what="Команда">Скопировать команду</button>`;
+    }
+    el.innerHTML = h;
+  } catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+// --- мои узлы ---------------------------------------------------------------
+
+async function renderMine() {
+  const el = $("#mine");
+  el.innerHTML = `<div class="card"><label class="muted">Адрес узла — кошелёк Axiome, на который он записан</label>
+    <input id="newaddr" placeholder="axm1…" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="main" id="addbtn">Добавить узел</button><p class="err" id="adderr"></p></div>
+    <div id="nodelist"><p class="empty">Загружаю…</p></div>`;
+  $("#addbtn").onclick = async () => {
+    const a = $("#newaddr").value.trim().toLowerCase();
+    try { nodes = (await api("PUT", "/api/me/nodes/" + encodeURIComponent(a))).nodes; $("#newaddr").value = ""; renderList(); }
+    catch (e) { $("#adderr").textContent = e.message; }
+  };
+  try { nodes = (await api("GET", "/api/me")).nodes; renderList(); }
+  catch (e) { $("#nodelist").innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+}
+
+function renderList() {
+  const el = $("#nodelist");
+  if (!nodes.length) {
+    el.innerHTML = `<p class="empty">Узлов пока нет. Добавьте адрес выше или откройте «Подключить», чтобы завести новый.</p>`;
+    return;
+  }
+  el.innerHTML = nodes.map(a => `<div class="card click" data-node="${esc(a)}">
+      <div class="row"><span class="addr">${esc(short(a))}</span><span class="badge" data-badge>…</span></div>
+      <div class="row" style="margin-top:6px"><span class="muted" data-line>загружаю из цепочки…</span></div></div>`).join("");
+  el.querySelectorAll("[data-node]").forEach(async card => {
+    card.onclick = () => openNode(card.dataset.node);
+    try {
+      const d = await api("GET", "/api/node/" + card.dataset.node);
+      const regs = d.registries.filter(r => !r.error);
+      const b = card.querySelector("[data-badge]"), line = card.querySelector("[data-line]");
+      if (!regs.length) { b.textContent = "не подключён"; b.className = "badge warn"; line.textContent = "ни в одном реестре"; return; }
+      const ready = regs.some(r => r.ready), banned = regs.some(r => r.status === "banned");
+      b.textContent = banned ? "забанен" : ready ? "работает" : "не готов";
+      b.className = "badge " + (banned ? "bad" : ready ? "ok" : "warn");
+      const earned = regs.reduce((s, r) => s + (r.earn ? r.earn.earned : 0), 0);
+      line.textContent = regs.map(r => r.card + (r.test ? " (тест)" : "")).join(", ") +
+        ` · заработано ${(earned / 1e6).toLocaleString("ru-RU", { maximumFractionDigits: 6 })} AXM`;
+    } catch (e) { card.querySelector("[data-line]").textContent = e.message; }
+  });
+}
+
+// --- узел подробно ----------------------------------------------------------
+
+async function openNode(addr) {
+  show("detail");
+  const el = $("#detail");
+  el.innerHTML = `<div class="card"><div class="addr">${esc(addr)}</div><p class="muted">Загружаю из цепочки…</p></div>`;
+  let d;
+  try { d = await api("GET", "/api/node/" + addr); }
+  catch (e) { el.innerHTML = `<p class="err">${esc(e.message)}</p>`; return; }
+  const bal = d.balances || {};
+  let h = `<div class="card"><div class="addr">${esc(addr)}</div>
+    <div class="grid" style="margin-top:10px">
+      <div><div class="muted">AXM на кошельке</div><div class="big">${esc(bal.AXM ?? "—")}</div></div>
+      <div><div class="muted">BARTR на кошельке</div><div class="big">${esc(bal.BARTR ?? "—")}</div></div>
+    </div></div>`;
+  const regs = d.registries.filter(r => !r.error);
+  if (!regs.length) {
+    h += `<div class="card"><p>Этот адрес не записан ни в один реестр.</p>
+      <button class="main" id="goconnect">Подключить узел</button></div>`;
+  }
+  for (const r of regs) {
+    const e = r.earn;
+    h += `<h2>${esc(r.card)}${r.test ? " · тестовый реестр" : ""}</h2>
+    <div class="card">
+      <div class="row"><span class="muted">Заработано</span>
+        <span class="badge ${r.status === "banned" ? "bad" : r.ready ? "ok" : "warn"}">${r.status === "banned" ? "забанен" : r.ready ? "работает" : "не готов"}</span></div>
+      <div class="big">${esc(e.earned_text)} ${esc(e.unit)}</div>
+      <div class="grid" style="margin-top:8px">
+        <div class="muted">Ответов: ${e.executed} · ${(e.earned_exec / 1e6).toLocaleString("ru-RU", { maximumFractionDigits: 6 })}</div>
+        <div class="muted">Проверок: ${e.checked} · ${(e.earned_check / 1e6).toLocaleString("ru-RU", { maximumFractionDigits: 6 })}</div>
+        <div class="muted">В работе: ${e.in_work}</div>
+        <div class="muted">Брошено: ${esc(r.abandoned ?? 0)}, обвинений: ${esc(r.convictions ?? 0)}</div>
+      </div>
+    </div>
+    <div class="card"><ul class="steps">${r.steps.map(s => `<li><span class="dot ${s.ok ? "ok" : "bad"}">${s.ok ? "✓" : "!"}</span>
+      <span>${esc(s.title)}${s.why ? `<br><span class="muted">${esc(s.why)}</span>` : ""}${s.id === "endpoint" && r.endpoint ? `<br><span class="muted addr">${esc(r.endpoint)}</span>` : ""}</span></li>`).join("")}</ul>
+      <div class="muted" style="margin-top:6px">Залог: ${esc(r.stake_text)} ${esc(r.stake_unit)}</div>
+    </div>
+    <div class="card" data-reg="${esc(r.contract)}">
+      <b>Действия</b>
+      ${!r.registered ? `<button class="sec" data-act="register">Записаться в реестр</button>` : ""}
+      <label class="muted">Сумма залога, ${esc(r.stake_unit)}</label>
+      <input data-amount inputmode="decimal" placeholder="${esc((r.min_stake / 1e6).toString())}">
+      <div class="grid"><button class="sec" data-act="stake">Внести</button><button class="sec" data-act="withdraw">Забрать</button></div>
+      <label class="muted">Адрес доставки (http://IP:порт)</label>
+      <input data-endpoint placeholder="http://1.2.3.4:8081" value="${esc(r.endpoint || "")}">
+      <div class="grid"><button class="sec" data-act="endpoint">Объявить адрес</button><button class="sec" data-act="docker">Команда запуска</button></div>
+      <div data-out></div>
+    </div>`;
+  }
+  h += `<button class="sec" id="rmnode" style="margin-top:12px">Убрать из моих узлов</button>`;
+  el.innerHTML = h;
+  const gc = $("#goconnect"); if (gc) gc.onclick = () => { show("connect"); renderConnect(addr); };
+  el.querySelectorAll("[data-reg]").forEach(box => {
+    box.querySelectorAll("[data-act]").forEach(b => b.onclick = () => {
+      const kind = b.dataset.act, args = {};
+      if (kind === "stake" || kind === "withdraw") {
+        const v = box.querySelector("[data-amount]").value.trim();
+        if (kind === "withdraw" && !v) { box.querySelector("[data-out]").innerHTML = `<p class="err">Укажите сумму</p>`; return; }
+        if (v) args.amount = v;
+      }
+      if (kind === "endpoint" || kind === "docker") args.endpoint = box.querySelector("[data-endpoint]").value.trim();
+      actionBlock(box.querySelector("[data-out]"), box.dataset.reg, kind, args);
+    });
+  });
+  $("#rmnode").onclick = async () => {
+    nodes = (await api("DELETE", "/api/me/nodes/" + addr)).nodes;
+    show("mine"); renderMine();
+  };
+}
+
+// --- подключить -------------------------------------------------------------
+
+function renderConnect(prefill = "") {
+  const el = $("#connect");
+  const ok = registries.filter(r => !r.error);
+  if (!ok.length) { el.innerHTML = `<p class="err">Реестры не прочитаны из цепочки. Попробуйте позже.</p>`; return; }
+  el.innerHTML = `
+  <h2>1. Ваша карта</h2>
+  <div class="card"><select id="reg">${ok.map(r => `<option value="${esc(r.contract)}">${esc(r.card)}${r.test ? " — тестовый, залог " + esc(r.min_stake_text) + " " + esc(r.stake_unit) : ""}</option>`).join("")}</select>
+    <div id="reginfo" class="muted"></div></div>
+  <h2>2. Кошелёк узла</h2>
+  <div class="card"><p class="muted">Адрес Axiome, на который запишется узел. На него придут выплаты, на нём лежит залог. Тип монеты 546, не 118.</p>
+    <input id="caddr" placeholder="axm1…" value="${esc(prefill)}" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="sec" id="cadd">Добавить в мои узлы — будут уведомления</button><p class="err" id="caerr"></p></div>
+  <h2>3. Записаться в реестр</h2>
+  <div class="card"><button class="sec" data-step="register">Получить сделку</button><div data-out></div></div>
+  <h2>4. Внести залог</h2>
+  <div class="card"><p class="muted" id="stakeinfo"></p><button class="sec" data-step="stake">Получить сделку</button><div data-out></div></div>
+  <h2>5. Запустить узел на машине с картой</h2>
+  <div class="card"><p class="muted">Linux, Docker, драйвер NVIDIA не ниже 570, один открытый TCP-порт. Адрес, по которому порт виден снаружи:</p>
+    <input id="cep" placeholder="http://1.2.3.4:8081">
+    <button class="sec" data-step="docker">Команда запуска</button><div data-out></div>
+    <p class="muted">Образ сам проверит карту, кеш ядер и пробу на эталоне, объявит адрес и начнёт брать задания. Если ключ узла на машине — рабочий, а не этот кошелёк, выдайте ему права:</p>
+    <input id="chot" placeholder="axm1… рабочего ключа" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="sec" data-step="hot">Права рабочему ключу</button><div data-out></div></div>
+  <h2>6. Проверить</h2>
+  <div class="card"><p class="muted">Откройте узел в «Мои узлы»: все шесть пунктов должны стать зелёными.</p>
+    ${guide ? `<button class="link" id="guide">Полная инструкция</button>` : ""}</div>`;
+  const info = () => {
+    const r = ok.find(x => x.contract === $("#reg").value);
+    $("#reginfo").innerHTML = `Модель ${esc(r.model)} · проверок на ответ: ${r.checks_required} · доля проверяющих ${(r.verifier_fee_bps / 100).toLocaleString("ru-RU")}% · оплата в ${esc(r.pay_unit)}`;
+    $("#stakeinfo").textContent = `Минимум ${r.min_stake_text} ${r.stake_unit}. Забирается обратно целиком, пока узел не пойман на подлоге.`;
+  };
+  $("#reg").onchange = info; info();
+  $("#cadd").onclick = async () => {
+    try { nodes = (await api("PUT", "/api/me/nodes/" + encodeURIComponent($("#caddr").value.trim().toLowerCase()))).nodes; toast("Добавлен"); $("#caerr").textContent = ""; }
+    catch (e) { $("#caerr").textContent = e.message; }
+  };
+  el.querySelectorAll("[data-step]").forEach(b => b.onclick = () => {
+    const kind = b.dataset.step, args = {};
+    if (kind === "docker") args.endpoint = $("#cep").value.trim();
+    if (kind === "hot") args.hot = $("#chot").value.trim().toLowerCase();
+    actionBlock(b.parentElement.querySelector("[data-out]") || b.nextElementSibling, $("#reg").value, kind, args);
+  });
+  // У кнопки «Права рабочему ключу» свой блок вывода — последний в карточке.
+  const hotBtn = el.querySelector('[data-step="hot"]');
+  hotBtn.onclick = () => actionBlock(hotBtn.nextElementSibling, $("#reg").value, "hot", { hot: $("#chot").value.trim().toLowerCase() });
+  const dockBtn = el.querySelector('[data-step="docker"]');
+  dockBtn.onclick = () => actionBlock(dockBtn.nextElementSibling, $("#reg").value, "docker", { endpoint: $("#cep").value.trim() });
+  const g = $("#guide"); if (g) g.onclick = () => tg ? tg.openLink(guide) : window.open(guide);
+}
+
+(async () => {
+  renderMine();
+  try { const d = await api("GET", "/api/registries"); registries = d.registries; guide = d.guide; }
+  catch (e) { registries = []; }
+  renderConnect();
+})();
+</script>
+</body>
+</html>

@@ -77,6 +77,7 @@ docker run -d --gpus all --name node -p 8081:8081 \
 |---|---|
 | `protocol/` | контракт CosmWasm, демоны исполнителя и проверяющего, правило вердикта |
 | `gateway/` | шлюз этапа 1: приём запроса, оплата, отдача ответа, без проверок |
+| `protocol/cabinet/` | кабинет владельца узла — мини-приложение Telegram: статус, залог, заработок, подключение новой карты; сделки подписывает кошелёк Axiome |
 | `protocol/agent/` | прокси для автономных агентов: OpenAI-совместимый API, агент платит своим кошельком в AXM, ответ — с вердиктом проверяющих |
 | `research/inference-determinism/` | замеры, которыми получен порог, вместе с сохранёнными векторами |
 | `research/migrate-rollback/` | опыт на девнете: перенос состояния сохраняет всё, откат на прежний код невозможен |
@@ -92,6 +93,7 @@ python protocol/daemon/test_daemons.py         # демоны
 python protocol/daemon/test_loop.py            # петля узла
 python protocol/daemon/test_client.py          # заказчик
 python protocol/agent/test_proxy.py            # прокси агентов
+python protocol/cabinet/test_cabinet.py        # кабинет узла
 python -m unittest discover -s gateway/tests   # шлюз
 docker run --rm -v "$PWD/protocol/contract:/w" -w /w rust:slim cargo test
 sh protocol/devnet/run.sh                      # полный цикл на настоящем wasmd
