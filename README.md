@@ -79,6 +79,7 @@ docker run -d --gpus all --name node -p 8081:8081 \
 | `gateway/` | шлюз этапа 1: приём запроса, оплата, отдача ответа, без проверок |
 | `protocol/cabinet/` | кабинет владельца узла — мини-приложение Telegram: статус, залог, заработок, подключение новой карты; сделки подписывает кошелёк Axiome |
 | `protocol/agent/` | прокси для автономных агентов: OpenAI-совместимый API, агент платит своим кошельком в AXM, ответ — с вердиктом проверяющих. Сделки подписывает сам, без `axmd`; запускается одним образом Docker |
+| `protocol/relay/` | посредник для текстов запросов: агенту не нужен открытый порт, работает из любой сети; узлы и контракт не меняются |
 | `research/inference-determinism/` | замеры, которыми получен порог, вместе с сохранёнными векторами |
 | `research/migrate-rollback/` | опыт на девнете: перенос состояния сохраняет всё, откат на прежний код невозможен |
 | `research/axiome-devnet/` | стенд с исправленным узлом Axiome: три правки, проверенные исполнением, и отрицательный контроль на выпуске |
@@ -94,6 +95,7 @@ python protocol/daemon/test_loop.py            # петля узла
 python protocol/daemon/test_client.py          # заказчик
 python protocol/daemon/test_wallet.py          # подпись сделок без axmd
 python protocol/agent/test_proxy.py            # прокси агентов
+python protocol/relay/test_relay.py            # посредник текстов
 python protocol/cabinet/test_cabinet.py        # кабинет узла
 python -m unittest discover -s gateway/tests   # шлюз
 docker run --rm -v "$PWD/protocol/contract:/w" -w /w rust:slim cargo test

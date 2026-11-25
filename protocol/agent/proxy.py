@@ -90,9 +90,16 @@ class Config:
         #: Имя ключа в связке axmd. Нужно только при SIGNER=axmd и должно
         #: давать тот же адрес, что SIGN_KEY.
         self.key = need("KEY") if self.signer == "axmd" else env.get("KEY")
+        #: Посредник для текстов (`protocol/relay`): прокси выкладывает
+        #: текст туда исходящим запросом, и узлы берут его там. Тогда
+        #: агенту не нужен ни белый адрес, ни открытый порт.
+        self.relay = env.get("RELAY", "").strip().rstrip("/") or None
         #: Адрес, по которому УЗЛЫ возьмут текст запроса. Снаружи, а не
-        #: localhost: исполнитель стоит на чужой машине.
-        self.prompt_uri = need("PROMPT_URI").rstrip("/")
+        #: localhost: исполнитель стоит на чужой машине. С посредником —
+        #: адрес посредника.
+        self.prompt_uri = (self.relay if self.relay and not
+                           env.get("PROMPT_URI", "").strip()
+                           else need("PROMPT_URI").rstrip("/"))
         self.prompt_port = int(env.get("PROMPT_PORT", "8090"))
         self.prompts = env.get("PROMPTS_DIR", "./prompts")
         #: API для агента. По умолчанию только с этой машины: кто достучится
@@ -244,11 +251,14 @@ class Refused(Exception):
 class Proxy:
     def __init__(self, cfg, store, sender, chainmod=chain,
                  fetch=client.fetch_answer, sources=client.answer_sources,
-                 now=time.time, sleep=time.sleep):
+                 now=time.time, sleep=time.sleep, upload=None):
         self.cfg, self.store, self.sender, self.chain = (cfg, store, sender,
                                                          chainmod)
         self.fetch, self.sources, self.now, self.sleep = (fetch, sources,
                                                           now, sleep)
+        #: Выкладка текста посреднику: `upload(text)`. None — посредника
+        #: нет, текст раздаёт сам прокси.
+        self.upload = upload
         #: Одна сделка за раз: у кошелька один номер последовательности.
         #: Под тем же замком — проверка потолка, иначе два запроса разом
         #: оба прошли бы под ним и вместе его превысили.
@@ -350,6 +360,15 @@ class Proxy:
                       newline="") as f:
                 f.write(prompt)
             self.pending.add(ph)
+            if self.upload is not None:
+                try:
+                    self.upload(prompt)
+                except Exception as e:
+                    self.pending.discard(ph)
+                    if ph not in self.active_hashes():
+                        os.remove(self._path(ph))
+                    raise Refused(503, f"посредник не принял текст, сделка "
+                                       f"не отправлена: {str(e)[:300]}")
             msg, funds, _ = client.submit_message(p, ph, self.cfg.price,
                                                   self.cfg.prompt_uri)
             try:
@@ -659,10 +678,16 @@ def main():
     n = proxy.purge()
     if n:
         print(f"стёрто текстов закрытых заданий: {n}", file=sys.stderr)
-    serve_prompts(cfg.prompts, cfg.prompt_port, allowed=proxy.active_hashes,
-                  auth=proxy.authorize)
-    print(f"тексты узлам: :{cfg.prompt_port}, снаружи {cfg.prompt_uri}",
-          file=sys.stderr)
+    if cfg.relay:
+        proxy.upload = lambda text: delivery.upload_prompt(cfg.relay, key,
+                                                           text)
+        print(f"тексты узлам: через посредника {cfg.relay}; открытый порт "
+              f"не нужен", file=sys.stderr)
+    else:
+        serve_prompts(cfg.prompts, cfg.prompt_port,
+                      allowed=proxy.active_hashes, auth=proxy.authorize)
+        print(f"тексты узлам: :{cfg.prompt_port}, снаружи {cfg.prompt_uri}",
+              file=sys.stderr)
     srv = http.server.ThreadingHTTPServer((cfg.api_host, cfg.api_port),
                                           make_handler(proxy))
     print(f"API агента: http://{cfg.api_host}:{cfg.api_port}/v1",

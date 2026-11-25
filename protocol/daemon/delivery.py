@@ -21,6 +21,7 @@
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 import chain
@@ -161,3 +162,30 @@ def bundle_check(job):
         bad = chain.job_problems(job, b["prompt"], b["answer"])
         return "; ".join(bad) if bad else None
     return check
+
+
+def upload_prompt(relay, key, text, timeout=30):
+    """Выложить текст запроса посреднику (`protocol/relay`).
+
+    Исходящий подписанный `PUT`: проходит из любой сети, открытый порт у
+    заказчика не нужен. Посредник сверяет текст с хэшем в имени и
+    запоминает, чей это текст: раздавать его он будет только узлам
+    заданий, где заказчик — этот же адрес. Отказ — исключение с текстом
+    посредника.
+    """
+    url = f"{relay.rstrip('/')}/{chain.text_hash(text)}.txt"
+    headers = {"Content-Type": "text/plain; charset=utf-8",
+               "User-Agent": "verifiable-inference/0.1"}
+    headers.update(sign.headers_for(key, url))
+    req = urllib.request.Request(url, data=text.encode("utf-8"),
+                                 headers=headers, method="PUT")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            why = json.loads(e.read()).get("error")
+        except Exception:
+            why = None
+        raise RuntimeError(f"посредник {relay} отказал: HTTP {e.code} "
+                           f"{why or e.reason}") from None

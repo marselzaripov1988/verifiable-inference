@@ -26,7 +26,7 @@
 |---|---|
 | кошелёк агента `axm1…` с AXM | из него оплачиваются задания и газ |
 | ключ этого кошелька файлом, 64 hex (`SIGN_KEY`) | подпись сделок и запросов к узлам: связку с ответом узел отдаёт только заказчику |
-| адрес, видимый снаружи (`PROMPT_URI`) | по нему узлы забирают текст запроса |
+| адрес посредника (`RELAY`) | через него узлы забирают текст запроса. Открытый порт и белый адрес агенту не нужны: прокси сам отправляет текст посреднику исходящим запросом (`protocol/relay`) |
 
 Больше ничего: ни `axmd`, ни `libwasmvm`, ни связки ключей. Сделки
 подписывает сам прокси (`protocol/daemon/wallet.py`, `SIGN_MODE_DIRECT`)
@@ -59,9 +59,9 @@ TOKEN=$(openssl rand -hex 16); echo "API_TOKEN агента: $TOKEN"   # сох�
 
 docker run -d --name vi-agent --restart unless-stopped \
   -v $PWD/agent.key:/key/agent.key:ro -v vi-agent:/data \
-  -p 127.0.0.1:8088:8088 -p 8090:8090 \
+  -p 127.0.0.1:8088:8088 \
   -e CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r \
-  -e PROMPT_URI=http://ВНЕШНИЙ-АДРЕС:8090 \
+  -e RELAY=https://АДРЕС-ПОСРЕДНИКА/relay \
   -e API_TOKEN=$TOKEN \
   -e MAX_SPEND_DAY=1000000 \
   vi-agent
@@ -72,7 +72,11 @@ docker run -d --name vi-agent --restart unless-stopped \
 `docker build` достаточно `ghcr.io/marselzaripov1988/verifiable-inference-agent:v1`.
 
 - Порт `8088` — API агента, открыт только на этой машине.
-- Порт `8090` — тексты запросов для узлов, должен быть виден снаружи.
+- Других портов не нужно: текст запроса уходит посреднику, а ответ
+  прокси сам забирает у узла. Работает из любой сети.
+- Без посредника можно и по-старому: вместо `RELAY` задать
+  `PROMPT_URI=http://ВНЕШНИЙ-АДРЕС:8090` и открыть `-p 8090:8090`
+  наружу.
 - В контейнере API слушает все адреса, поэтому `API_TOKEN` обязателен:
   без него прокси не стартует. Агент передаёт токен как `api_key`
   клиента OpenAI.
@@ -87,7 +91,7 @@ docker run -d --name vi-agent --restart unless-stopped \
 ```sh
 CONTRACT=axm1fe5dsxm3vcnwjkvlgjk9mkvqnl6ggpay3y3r94hls7g3hz4s68tqcp547r \
 SIGN_KEY=./agent.key \
-PROMPT_URI=http://ВНЕШНИЙ-АДРЕС:8090 \
+RELAY=https://АДРЕС-ПОСРЕДНИКА/relay \
 MAX_SPEND_DAY=1000000 \
 python3 -u protocol/agent/proxy.py
 ```
@@ -104,7 +108,8 @@ python3 -u protocol/agent/proxy.py
 | `CONTRACT` | — | реестр. Его расчёт обязан быть `{"native":"uaxm"}`, иначе прокси отказывает |
 | `SIGN_KEY` | — | файл с ключом агента (64 hex) |
 | `SIGNER` | `python` | `python` — подпись самим прокси через LCD; `axmd` — утилитой цепочки, тогда нужен и `KEY` (имя в связке) |
-| `PROMPT_URI`, `PROMPT_PORT` | —, `8090` | откуда узлы берут текст запроса (снаружи) и какой порт для этого слушается |
+| `RELAY` | — | посредник для текстов (`protocol/relay`). С ним открытый порт не нужен |
+| `PROMPT_URI`, `PROMPT_PORT` | —, `8090` | без посредника: откуда узлы берут текст запроса (снаружи) и какой порт для этого слушается. Нужен `RELAY` или `PROMPT_URI` |
 | `API_HOST`, `API_PORT` | `127.0.0.1`, `8088` | API для агента |
 | `API_TOKEN` | пусто | `Authorization: Bearer …`. Обязателен, если API открыт не на localhost |
 | `PRICE` | `10000` | цена задания узлу в uaxm; доля проверяющих (сейчас 4,85%) добавляется сверху по данным цепочки |
