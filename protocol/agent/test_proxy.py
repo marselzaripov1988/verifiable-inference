@@ -370,6 +370,44 @@ def run(tmp):
     except SystemExit:
         ok(True, "неизвестный SIGNER — отказ")
 
+    # --- посредник: открытый порт не нужен --------------------------------
+    nouri = {"CONTRACT": "axm1c", "SIGN_KEY": "k"}
+    try:
+        proxy.Config(nouri)
+        ok(False, "без PROMPT_URI и RELAY — отказ при запуске")
+    except SystemExit:
+        ok(True, "без PROMPT_URI и RELAY — отказ при запуске")
+    cfg = proxy.Config(dict(nouri, RELAY="https://relay.example.org/"))
+    ok(cfg.relay == "https://relay.example.org" and
+       cfg.prompt_uri == "https://relay.example.org",
+       "с RELAY адрес текста в задании — посредник")
+
+    p, ch, snd, srv, clock = make(fresh(tmp, "r1"), honest("Париж"),
+                                  prompt_uri="https://relay.example.org")
+    order = []
+    p.upload = lambda text: order.append(("upload", text, len(snd.sent)))
+    code, d = call(srv, "POST", "/v1/chat/completions", CHAT)
+    ok(code == 200 and order and order[0][2] == 0,
+       "текст уходит посреднику ДО сделки")
+    ok(snd.sent[0][0]["submit_job"]["prompt_uri"] ==
+       "https://relay.example.org", "в задании prompt_uri посредника")
+    ok(chain.text_hash(order[0][1]) ==
+       snd.sent[0][0]["submit_job"]["prompt_hash"],
+       "посреднику ушёл ровно тот текст, чей хэш в задании")
+    srv.shutdown()
+
+    p, ch, snd, srv, clock = make(fresh(tmp, "r2"), honest("Париж"))
+
+    def down(text):
+        raise RuntimeError("посредник молчит")
+    p.upload = down
+    code, d = call(srv, "POST", "/v1/chat/completions", CHAT)
+    ok(code == 503 and not snd.sent,
+       f"посредник не принял — 503, сделки нет ({code})")
+    ok(p.store.spent(p.day()) == 0 and not os.listdir(p.cfg.prompts),
+       "потолок не тронут, текст стёрт")
+    srv.shutdown()
+
 
 if __name__ == "__main__":
     raise SystemExit(main())
